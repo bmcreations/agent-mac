@@ -8,7 +8,7 @@
 #
 #   scripts/vm/record-fold.sh -a <Handset.app> -t <target> -o <out> [-b label] [-s secs] step...
 #
-#   step   a posture-pill label as Handset names it (e.g. Close, Open), or
+#   step   a posture-pill label as Handset names it (Closed, Open, ...), or
 #          loupe:<posture> to set it through loupe (closed, halfOpened, opened)
 #          without a click. The first step is always set through loupe.
 #   -b     build label for the manifest (default: app name + build time)
@@ -50,24 +50,43 @@ s=$(api POST "/api/claims?target=$target")
 [ "$s" = 200 ] || { echo "claim refused ($s): $(cat "$out/.body")" >&2; exit 1; }
 trap 'api DELETE "/api/claims?target=$target" >/dev/null; "$vm" quit >/dev/null 2>&1 || true' EXIT
 
+locked() { ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -q '<true/>' && echo yes || echo no; }
+locked_start=$(locked)
+
 "$vm" status | grep -q "running at" || "$vm" up
 [ -n "$label" ] || label="$(basename "$app") built $(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$app/Contents/MacOS")"
 "$vm" install "$app" "$label"
 "$vm" run "$target"
 
+# The ref of Handset's button named exactly $1, or nothing.
+ref_of() {
+  "$vm" ad find --app Handset --role button --name "$1" | python3 -c '
+import json, sys
+d = json.load(sys.stdin).get("data") or {}
+m = d.get("matches", []) if isinstance(d, dict) else d
+m = [e for e in m if e.get("name") == sys.argv[1] and e.get("ref_id")]
+print(m[0]["ref_id"] if m else "")' "$1"
+}
+
 first=${1#loupe:}; shift
 posture "$first"
-sleep 3
+
+# Handset reads the posture once on open; a read made while the device was
+# still booting leaves the pill without postures until Handset reopens it.
+pill=${PILL_PROBE:-Open}
+for try in 1 2; do
+  for i in $(seq 20); do [ -n "$(ref_of "$pill")" ] && break 2; sleep 1; done
+  [ $try = 1 ] && { echo "no \"$pill\" in the posture pill; reopening Handset" >&2; "$vm" run "$target"; }
+done
+[ -n "$(ref_of "$pill")" ] || { echo "no \"$pill\" in Handset's posture pill" >&2; exit 1; }
+sleep 2
 
 n=0
 for step in "$@"; do
   n=$((n + 1)); name=$(printf '%02d-%s' $n "${step#loupe:}" | tr ' ' '_')
   ref=
   if [ "${step#loupe:}" = "$step" ]; then
-    ref=$("$vm" ad find --app Handset --name "$step" --exact | python3 -c '
-import json, sys
-d = json.load(sys.stdin)["data"]; m = d.get("matches", d) if isinstance(d, dict) else d
-print(m[0]["ref"] if m else "")')
+    ref=$(ref_of "$step")
     [ -n "$ref" ] || { echo "no \"$step\" control in Handset" >&2; exit 1; }
   fi
   "$vm" record start $((secs + 5))
@@ -80,9 +99,9 @@ print(m[0]["ref"] if m else "")')
   cat "$out/$name.fps.json"
 done
 
-lock=$(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>' || true)
 python3 -c '
 import json, sys
-print(json.dumps(dict(zip(["target", "build", "host_locked_at_end", "finished"], sys.argv[1:])), indent=1))' \
-  "$target" "$label" "$([ "$lock" = 1 ] && echo yes || echo no)" "$(date -u +%FT%TZ)" > "$out/manifest.json"
+keys = ["target", "build", "host_locked_at_start", "host_locked_at_end", "finished"]
+print(json.dumps(dict(zip(keys, sys.argv[1:])), indent=1))' \
+  "$target" "$label" "$locked_start" "$(locked)" "$(date -u +%FT%TZ)" > "$out/manifest.json"
 echo "wrote $out" >&2
