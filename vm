@@ -15,6 +15,7 @@
 #   vm record start [secs]     record the guest screen (default 60 s max)
 #   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
 #   vm shot <dir> [name]       one guest screenshot into <dir>
+#   vm vsync [secs]            guest display refreshes per second (compositing check)
 #
 # VM_HOME (default <repo>/.vm) holds the ssh key, logs and run state.
 # TART (default `tart` on PATH, else ~/.local/bin/tart). VM_NAME, VM_IMAGE.
@@ -115,6 +116,11 @@ defaults write com.apple.screensaver askForPasswordDelay -int 0
 sudo sysadminctl -screenLock off -password admin >/dev/null 2>&1 || true
 mkdir -p ~/Applications ~/vm/rec
 EOF
+  # vsync: display refreshes per second, to see the guest is compositing.
+  mkdir -p "$VM_HOME/bin"
+  [ "$VM_HOME/bin/vsync" -nt "$here/guest/vsync.swift" ] ||
+    xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/vsync" "$here/guest/vsync.swift"
+  g "mkdir -p ~/vm/bin && cat > ~/vm/bin/vsync && chmod +x ~/vm/bin/vsync" < "$VM_HOME/bin/vsync"
   # agent-desktop: the launcher and its macOS helper, both arm64.
   tar -C "$AD_DIR" -cf - agent-desktop agent-desktop-darwin-arm64 \
       agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
@@ -206,6 +212,8 @@ cmd_record() {
   esac
 }
 
+cmd_vsync() { g "~/vm/bin/vsync ${1:-10}"; }
+
 cmd_shot() {
   local dir=${1:?usage: vm shot <dir> [name]} name=${2:-shot-$(date +%H%M%S)}
   mkdir -p "$dir"
@@ -215,6 +223,6 @@ cmd_shot() {
 
 c=${1:-}; shift || true
 case $c in
-  up|down|status|ssh|setup|install|run|quit|ad|record|shot) "cmd_$c" "$@" ;;
-  *) sed -n 2,20p "$0"; exit 2 ;;
+  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync) "cmd_$c" "$@" ;;
+  *) sed -n 2,21p "$0"; exit 2 ;;
 esac
