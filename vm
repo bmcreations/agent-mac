@@ -54,7 +54,8 @@ ip() { "$TART" ip "$VM_NAME" --wait "${1:-5}"; }
 sshopts=(-i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
   -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" -o LogLevel=ERROR
   -o ConnectTimeout=5 -o ServerAliveInterval=10)
-g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" "$@"; }   # run in the guest
+# Run in the guest. ssh's PATH lacks /usr/local/bin, where agent-desktop goes.
+g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" 'export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH;' "$@"; }
 q() { printf '%q ' "$@"; }                               # quote for the remote shell
 
 # The base image's admin/admin, used once to install the key.
@@ -133,6 +134,25 @@ defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 sudo sysadminctl -screenLock off -password admin >/dev/null 2>&1 || true
 mkdir -p ~/Applications ~/vm/rec
+# Screen capture over ssh counts against sshd-keygen-wrapper, which the base
+# image grants in TCC.db. replayd still shows a monthly "bypass the private
+# window picker" alert over the desktop, once LastAlerted is over 30 days old;
+# mark it alerted now (every `vm up` refreshes this).
+a=~/Library/Group\ Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist
+mkdir -p "$(dirname "$a")"
+cat > "$a" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>/usr/libexec/sshd-keygen-wrapper</key><dict>
+    <key>kScreenCaptureApprovalLastAlerted</key><date>NOW</date>
+    <key>kScreenCapturePrivacyHintDate</key><date>2100-01-01T00:00:00Z</date>
+    <key>kScreenCapturePrivacyHintPolicy</key><integer>2592000</integer>
+  </dict>
+</dict></plist>
+PL
+sed -i '' "s/<date>NOW</<date>$(date -u +%Y-%m-%dT%H:%M:%SZ)</" "$a"
+killall replayd 2>/dev/null || true
 EOF
   # vsync: display refreshes per second, to see the guest is compositing.
   mkdir -p "$VM_HOME/bin"
