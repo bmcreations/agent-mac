@@ -183,7 +183,7 @@ echo "askForPassword: $(defaults read com.apple.screensaver askForPassword 2>/de
 echo "screenLock: $(sysadminctl -screenLock status 2>&1 | sed 's/.*] //')"
 pmset -g | awk '$1 ~ /^(sleep|displaysleep|disksleep)$/ {printf "pmset %s: %s\n", $1, $2}'
 echo "guest locked: $(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')"
-pgrep -x Handset >/dev/null && echo "Handset: running ($(cat ~/Applications/Handset.build 2>/dev/null))" || echo "Handset: not running"
+pgrep -f "^$HOME/Applications/Handset.app/Contents/MacOS/Handset" >/dev/null && echo "Handset: running ($(cat ~/Applications/Handset.build 2>/dev/null))" || echo "Handset: not running"
 EOF
 }
 
@@ -216,7 +216,10 @@ cmd_run() {
 }
 
 cmd_quit() {
-  g "agent-desktop close-app Handset >/dev/null 2>&1; sleep 1; pkill -x Handset; true"
+  # Match the installed copy by path: other sessions run their own Handset
+  # builds in this guest under other paths, and a name match would kill those.
+  local exe="$APP/Contents/MacOS/Handset"
+  g "pkill -TERM -f $(q "^$exe") || exit 0; for i in 1 2 3 4 5; do pgrep -f $(q "^$exe") >/dev/null || exit 0; sleep 1; done; pkill -KILL -f $(q "^$exe"); true"
 }
 
 cmd_ad() { g "agent-desktop $(q "$@")"; }

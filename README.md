@@ -15,7 +15,7 @@ scripts/vm/vm run sim:00000000-0000-0000-0000-000000000000
 scripts/vm/vm ad snapshot --app Handset -i        # agent-desktop in the guest
 scripts/vm/vm record start 30
 scripts/vm/vm ad click @e12
-scripts/vm/vm record stop ~/some/folder fold-1    # pulls fold-1.mov + fold-1.fps.json
+scripts/vm/vm record stop ~/some/folder fold-1    # pulls fold-1.mov, .ticks.json, .fps.json
 scripts/vm/vm quit                                # don't leave a second viewer open
 scripts/vm/vm down
 ```
@@ -38,10 +38,36 @@ lock, sleep and autologin settings. Run state, the ssh key and logs live in
   straight to the host. The token is passed in `LOUPE_TOKEN` at launch.
 - **TCC**: the Cirrus base image grants Accessibility, Screen Recording and
   Post Event to `/usr/libexec/sshd-keygen-wrapper`, the responsible process
-  for commands run over ssh, so agent-desktop and `screencapture` work over
-  ssh without a click.
+  for commands run over ssh, so agent-desktop and screen capture work over
+  ssh without a click. macOS still raises a "bypass the private window
+  picker" alert for capture from that process; `vm setup` and `vm record
+  start` press its Allow button through System Events. Writing
+  `ScreenCaptureApprovals.plist` does not stop it (replayd rewrites it).
 - **Never locks**: autologin as `admin`, screensaver idle 0, askForPassword 0,
   screen lock off, `pmset sleep/displaysleep/disksleep 0`.
+
+## Recording
+
+`vm record` runs `guest/rec.swift` in the guest: ScreenCaptureKit at up to
+60 Hz, with a 60 Hz wall-clock timer that writes the latest frame each tick.
+The .mov is constant 60 fps (a frame repeats when the screen has not
+changed), it stops on time even on a still screen, and `<name>.ticks.json`
+marks each tick `1` (a new frame arrived) or `0` (repeat), so you can tell a
+still screen from a stalled capture. `fps` reports frames/duration, distinct
+frames, dark frames, drops and the fresh-frame rate.
+
+It records at the display's point size, 1920x1200. At the full 3840x2400 the
+encoder dropped 96 of 593 ticks in bursts at each keyframe; at 1920x1200 it
+dropped none. Don't use `screencapture -v`: it writes frames only on change,
+and its `-V` limit counts media time, so on a still screen it never stops.
+
+## Sharing the guest
+
+There is one guest and one display. Two sessions driving it collide: keys
+land in the other's window, and quitting by app name kills the other's
+build. `vm quit` only kills `~/Applications/Handset.app`; keep other builds
+at other paths, and agree with the other session who holds the display
+before sending input or recording.
 
 ## Host sleep
 
