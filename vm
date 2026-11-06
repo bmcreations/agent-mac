@@ -35,6 +35,8 @@ LOUPE_TOKEN_FILE=${LOUPE_TOKEN_FILE:-$HOME/Library/Caches/loupe/token}
 AD_DIR=${AD_DIR:-$(dirname "$(readlink -f "$(command -v agent-desktop)")")}
 GUEST_USER=admin GUEST_PASS=admin
 APP=/Users/$GUEST_USER/Applications/Handset.app
+JOB=dev.bmcreations.handset-vm.$VM_NAME
+job_plist=$VM_HOME/run/$JOB.plist
 
 mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run"
 key=$VM_HOME/ssh/id_ed25519
@@ -44,7 +46,7 @@ die() { echo "vm: $*" >&2; exit 1; }
 log() { echo "vm: $*" >&2; }
 
 exists() { "$TART" list --format json | python3 -c '
-import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] for v in json.load(sys.stdin)) else 1)' "$VM_NAME"; }
+import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] for v in json.load(sys.stdin)) else 1)' "${1:-$VM_NAME}"; }
 running() { "$TART" list --format json | python3 -c '
 import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] and v["State"] == "running" for v in json.load(sys.stdin)) else 1)' "$VM_NAME"; }
 ip() { "$TART" ip "$VM_NAME" --wait "${1:-5}"; }
@@ -73,7 +75,8 @@ cmd_up() {
   if ! exists; then
     # fetch-image resumes after an outage, where tart pull starts over.
     local src="127.0.0.1:${FETCH_PORT:-5917}/${VM_IMAGE#ghcr.io/}"
-    if ! "$TART" list --format json | grep -q "\"$src\""; then
+    # Parse the JSON: tart escapes the slashes in names ("127.0.0.1:5917\/…").
+    if ! exists "$src"; then
       caffeinate -i "$here/fetch-image" "$VM_HOME/oci" "$VM_IMAGE" >/dev/null
     fi
     log "cloning $src to $VM_NAME"
@@ -81,10 +84,25 @@ cmd_up() {
     "$TART" set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEMORY" --display "$VM_DISPLAY"
   fi
   if ! running; then
-    # Detached from this shell: no window on the host, survives the caller.
-    nohup "$TART" run --no-graphics "$VM_NAME" </dev/null >>"$VM_HOME/logs/tart-run.log" 2>&1 &
-    echo $! > "$VM_HOME/run/tart.pid"; disown
-    log "booting (pid $(cat "$VM_HOME/run/tart.pid"))"
+    # A launchd job, not a child of this shell: no window on the host, and it
+    # outlives the caller (an agent harness reaps its process group).
+    cat > "$job_plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$JOB</string>
+  <key>ProgramArguments</key><array>
+    <string>$TART</string><string>run</string><string>--no-graphics</string><string>$VM_NAME</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>StandardOutPath</key><string>$VM_HOME/logs/tart-run.log</string>
+  <key>StandardErrorPath</key><string>$VM_HOME/logs/tart-run.log</string>
+</dict></plist>
+EOF
+    launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$job_plist"
+    log "booting (launchd job $JOB)"
   fi
   ip 180 >/dev/null || die "no IP after 180 s"
   local i
@@ -133,6 +151,7 @@ cmd_down() {
   g "sudo shutdown -h now" >/dev/null 2>&1 || true
   local i; for i in $(seq 40); do running || break; sleep 2; done
   running && "$TART" stop "$VM_NAME"
+  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
   log "down"
 }
 
