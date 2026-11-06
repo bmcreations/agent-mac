@@ -57,6 +57,9 @@ sshopts=(-i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
 # Run in the guest. ssh's PATH lacks /usr/local/bin, where agent-desktop goes.
 g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" 'export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH;' "$@"; }
 q() { printf '%q ' "$@"; }                               # quote for the remote shell
+# Guest shell snippet: press Allow on replayd's screen capture alert if it is
+# up, polling up to ~2 s; prints "allowed" when it pressed it.
+allow_js='for i in 1 2 3 4; do n=$(osascript -e "tell application \"System Events\" to count windows of process \"UserNotificationCenter\"" 2>/dev/null); if [ "${n:-0}" -gt 0 ] && osascript -e "tell application \"System Events\" to tell process \"UserNotificationCenter\" to click button \"Allow\" of window 1" >/dev/null 2>&1; then echo allowed; break; fi; sleep 0.5; done'
 
 # The base image's admin/admin, used once to install the key.
 pw_ssh() {
@@ -134,31 +137,22 @@ defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 sudo sysadminctl -screenLock off -password admin >/dev/null 2>&1 || true
 mkdir -p ~/Applications ~/vm/rec
-# Screen capture over ssh counts against sshd-keygen-wrapper, which the base
-# image grants in TCC.db. replayd still shows a monthly "bypass the private
-# window picker" alert over the desktop, once LastAlerted is over 30 days old;
-# mark it alerted now (every `vm up` refreshes this).
-a=~/Library/Group\ Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist
-mkdir -p "$(dirname "$a")"
-cat > "$a" <<'PL'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>/usr/libexec/sshd-keygen-wrapper</key><dict>
-    <key>kScreenCaptureApprovalLastAlerted</key><date>NOW</date>
-    <key>kScreenCapturePrivacyHintDate</key><date>2100-01-01T00:00:00Z</date>
-    <key>kScreenCapturePrivacyHintPolicy</key><integer>2592000</integer>
-  </dict>
-</dict></plist>
-PL
-sed -i '' "s/<date>NOW</<date>$(date -u +%Y-%m-%dT%H:%M:%SZ)</" "$a"
-killall replayd 2>/dev/null || true
 EOF
   # vsync: display refreshes per second, to see the guest is compositing.
   mkdir -p "$VM_HOME/bin"
   [ "$VM_HOME/bin/vsync" -nt "$here/guest/vsync.swift" ] ||
     xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/vsync" "$here/guest/vsync.swift"
   g "mkdir -p ~/vm/bin && cat > ~/vm/bin/vsync && chmod +x ~/vm/bin/vsync" < "$VM_HOME/bin/vsync"
+  # rec: constant-frame-rate recorder (screencapture -v hangs on a still screen).
+  [ "$VM_HOME/bin/rec" -nt "$here/guest/rec.swift" ] ||
+    xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/rec" "$here/guest/rec.swift"
+  g "cat > ~/vm/bin/rec && chmod +x ~/vm/bin/rec" < "$VM_HOME/bin/rec"
+  # Screen capture over ssh counts against sshd-keygen-wrapper, which the base
+  # image grants in TCC.db. replayd still raises a "bypass the system private
+  # window picker" alert over the desktop on a video capture until someone
+  # presses Allow; writing its ScreenCaptureApprovals.plist did not stop it.
+  # Take a short capture now and press Allow, so it is not in a recording.
+  g "~/vm/bin/rec ~/vm/rec/warmup.mov 2 >/dev/null 2>&1 </dev/null & sleep 1; $allow_js; wait; rm -f ~/vm/rec/warmup.mov ~/vm/rec/warmup.ticks.json"
   # agent-desktop: the launcher and its macOS helper, both arm64.
   tar -C "$AD_DIR" -cf - agent-desktop agent-desktop-darwin-arm64 \
       agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
@@ -233,17 +227,25 @@ cmd_record() {
       local secs=${2:-60}
       # The guest pauses whenever the host sleeps; hold the host awake.
       nohup caffeinate -i -t $((secs + 30)) >/dev/null 2>&1 & echo $! > "$VM_HOME/run/caffeinate.pid"; disown
-      g "rm -f ~/vm/rec/current.mov; nohup screencapture -v -C -k -V $secs -x ~/vm/rec/current.mov \
-         >~/vm/rec/screencapture.log 2>&1 </dev/null & echo \$! > ~/vm/rec/pid"
-      sleep 1
-      g "kill -0 \$(cat ~/vm/rec/pid)" || die "screencapture did not start: $(g 'cat ~/vm/rec/screencapture.log')"
+      g "rm -f ~/vm/rec/current.mov ~/vm/rec/current.ticks.json; nohup ~/vm/bin/rec ~/vm/rec/current.mov $secs ${REC_SIZE:-} \
+         >~/vm/rec/rec.log 2>&1 </dev/null & echo \$! > ~/vm/rec/pid"
+      [ "$(g "$allow_js")" = allowed ] && log "pressed Allow on the screen capture alert"
+      local i; for i in $(seq 20); do
+        g "grep -q '^recording' ~/vm/rec/rec.log" && break
+        g "kill -0 \$(cat ~/vm/rec/pid) 2>/dev/null" || die "rec exited: $(g 'cat ~/vm/rec/rec.log')"
+        sleep 0.5
+      done
+      g "grep -q '^recording' ~/vm/rec/rec.log" || die "rec has no frame yet: $(g 'cat ~/vm/rec/rec.log')"
       log "recording (max ${secs}s)"
       ;;
     stop)
       local dir=${2:?usage: vm record stop <dir> [name]} name=${3:-guest-$(date +%Y%m%d-%H%M%S)}
       mkdir -p "$dir"
-      g "p=\$(cat ~/vm/rec/pid); kill -INT \$p 2>/dev/null; for i in \$(seq 30); do kill -0 \$p 2>/dev/null || break; sleep 0.5; done"
+      g "p=\$(cat ~/vm/rec/pid); kill -INT \$p 2>/dev/null; for i in \$(seq 30); do kill -0 \$p 2>/dev/null || break; sleep 0.5; done; ! kill -0 \$p 2>/dev/null" ||
+        die "rec did not finish in 15 s"
+      g "test -s ~/vm/rec/current.mov" || die "no recording: $(g 'cat ~/vm/rec/rec.log')"
       g "cat ~/vm/rec/current.mov" > "$dir/$name.mov"
+      g "cat ~/vm/rec/current.ticks.json" > "$dir/$name.ticks.json"
       kill "$(cat "$VM_HOME/run/caffeinate.pid" 2>/dev/null)" 2>/dev/null || true
       "$here/fps" "$dir/$name.mov" | tee "$dir/$name.fps.json"
       ;;

@@ -1,6 +1,9 @@
 #!/bin/bash
 # Measured frame rate of a recording: decoded frames / duration, plus how many
 # frames are distinct (a paused or black guest repeats one frame), as JSON.
+# With rec's <movie-without-.mov>.ticks.json beside it, also: ticks that got
+# a new frame from the display, ticks the encoder dropped, and the longest run
+# of held ticks (a stall, or just a still screen; compare with the picture).
 #   scripts/vm/fps <movie>
 set -euo pipefail
 f=${1:?usage: fps <movie>}
@@ -14,10 +17,17 @@ distinct=$(ffmpeg -v error -i "$f" -vf mpdecimate=hi=64:lo=32:frac=0.1 -f null -
 dark=$(ffmpeg -v error -i "$f" -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - 2>/dev/null \
   | awk -F= '/YAVG/ { if ($2 < 20) n++ } END { print n + 0 }')
 python3 -c '
-import json, sys
+import json, os, re, sys
 f, frames, dur, size, distinct, dark = sys.argv[1:]
 frames, dur = int(frames), float(dur)
-print(json.dumps({"file": f, "size": size, "frames": frames, "duration_s": round(dur, 3),
-                  "fps": round(frames / dur, 2) if dur else 0,
-                  "distinct_frames": int(distinct or 0), "dark_frames": int(dark)}))' \
+r = {"file": f, "size": size, "frames": frames, "duration_s": round(dur, 3),
+     "fps": round(frames / dur, 2) if dur else 0,
+     "distinct_frames": int(distinct or 0), "dark_frames": int(dark)}
+side = os.path.splitext(f)[0] + ".ticks.json"
+if os.path.exists(side):
+    t = json.load(open(side))
+    held = max((len(m) for m in re.findall(r"0+", t["ticks"])), default=0)
+    r.update(capture_hz=t["hz"], fresh_ticks=t["fresh"], dropped_ticks=t["dropped"],
+             longest_hold_ms=round(held * 1000 / t["hz"]))
+print(json.dumps(r))' \
   "$f" "$frames" "$dur" "$size" "$distinct" "$dark"
