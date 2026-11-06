@@ -70,8 +70,13 @@ loupe_host() { # the name on loupe's certificate, so the guest verifies it
 
 cmd_up() {
   if ! exists; then
-    log "cloning $VM_IMAGE to $VM_NAME"
-    "$TART" clone "$VM_IMAGE" "$VM_NAME"
+    # fetch-image resumes after an outage, where tart pull starts over.
+    local src="127.0.0.1:${FETCH_PORT:-5917}/${VM_IMAGE#ghcr.io/}"
+    if ! "$TART" list --format json | grep -q "\"$src\""; then
+      caffeinate -i "$here/fetch-image" "$VM_HOME/oci" "$VM_IMAGE" >/dev/null
+    fi
+    log "cloning $src to $VM_NAME"
+    "$TART" clone "$src" "$VM_NAME"
     "$TART" set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEMORY" --display "$VM_DISPLAY"
   fi
   if ! running; then
