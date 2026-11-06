@@ -1,0 +1,23 @@
+#!/bin/bash
+# Measured frame rate of a recording: decoded frames / duration, plus how many
+# frames are distinct (a paused or black guest repeats one frame), as JSON.
+#   scripts/vm/fps <movie>
+set -euo pipefail
+f=${1:?usage: fps <movie>}
+frames=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$f")
+dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f")
+size=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$f")
+# mpdecimate drops frames that match the previous one; what is left is distinct.
+distinct=$(ffmpeg -v error -i "$f" -vf mpdecimate=hi=64:lo=32:frac=0.1 -f null - -stats 2>&1 | tr '\r' '\n' \
+  | sed -n 's/^frame= *\([0-9]*\).*/\1/p' | tail -1)
+# Frames whose mean luma is under 20 (video black is 16), to catch black frames.
+dark=$(ffmpeg -v error -i "$f" -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - 2>/dev/null \
+  | awk -F= '/YAVG/ { if ($2 < 20) n++ } END { print n + 0 }')
+python3 -c '
+import json, sys
+f, frames, dur, size, distinct, dark = sys.argv[1:]
+frames, dur = int(frames), float(dur)
+print(json.dumps({"file": f, "size": size, "frames": frames, "duration_s": round(dur, 3),
+                  "fps": round(frames / dur, 2) if dur else 0,
+                  "distinct_frames": int(distinct or 0), "dark_frames": int(dark)}))' \
+  "$f" "$frames" "$dur" "$size" "$distinct" "$dark"

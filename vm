@@ -1,0 +1,215 @@
+#!/bin/bash
+# One macOS guest VM (tart) for UI checks of the Mac Handset app: agents drive
+# Handset in the guest with agent-desktop and record the guest screen, so the
+# host's display, mouse and keyboard stay free and a locked host screen does
+# not stop the run. Devices stay on the host behind loupe. See README.md.
+#
+#   vm up                      create (first time), boot headless, set up the guest
+#   vm down                    shut the guest down
+#   vm status                  VM state, IP, host lock, guest power/lock settings
+#   vm ssh [cmd...]            a shell, or one command, in the guest
+#   vm install <Handset.app> [build label]
+#   vm run [target,...]        start Handset against the host loupe, opening targets
+#   vm quit                    quit Handset in the guest
+#   vm ad <args...>            agent-desktop in the guest
+#   vm record start [secs]     record the guest screen (default 60 s max)
+#   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
+#   vm shot <dir> [name]       one guest screenshot into <dir>
+#
+# VM_HOME (default <repo>/.vm) holds the ssh key, logs and run state.
+# TART (default `tart` on PATH, else ~/.local/bin/tart). VM_NAME, VM_IMAGE.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+VM_HOME=${VM_HOME:-$repo/.vm}
+VM_NAME=${VM_NAME:-handset-agent}
+VM_IMAGE=${VM_IMAGE:-ghcr.io/cirruslabs/macos-golden-gate-base:latest}
+VM_CPU=${VM_CPU:-4}
+VM_MEMORY=${VM_MEMORY:-8192}
+VM_DISPLAY=${VM_DISPLAY:-1920x1200}
+TART=${TART:-$(command -v tart || echo "$HOME/.local/bin/tart")}
+LOUPE_PORT=${LOUPE_PORT:-18456}
+LOUPE_TOKEN_FILE=${LOUPE_TOKEN_FILE:-$HOME/Library/Caches/loupe/token}
+AD_DIR=${AD_DIR:-$(dirname "$(readlink -f "$(command -v agent-desktop)")")}
+GUEST_USER=admin GUEST_PASS=admin
+APP=/Users/$GUEST_USER/Applications/Handset.app
+
+mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run"
+key=$VM_HOME/ssh/id_ed25519
+[ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -C "$VM_NAME" -f "$key"
+
+die() { echo "vm: $*" >&2; exit 1; }
+log() { echo "vm: $*" >&2; }
+
+exists() { "$TART" list --format json | python3 -c '
+import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] for v in json.load(sys.stdin)) else 1)' "$VM_NAME"; }
+running() { "$TART" list --format json | python3 -c '
+import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] and v["State"] == "running" for v in json.load(sys.stdin)) else 1)' "$VM_NAME"; }
+ip() { "$TART" ip "$VM_NAME" --wait "${1:-5}"; }
+
+sshopts=(-i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" -o LogLevel=ERROR
+  -o ConnectTimeout=5 -o ServerAliveInterval=10)
+g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" "$@"; }   # run in the guest
+q() { printf '%q ' "$@"; }                               # quote for the remote shell
+
+# The base image's admin/admin, used once to install the key.
+pw_ssh() {
+  local ask=$VM_HOME/ssh/askpass
+  printf '#!/bin/sh\necho %s\n' "$GUEST_PASS" > "$ask"; chmod 700 "$ask"
+  SSH_ASKPASS=$ask SSH_ASKPASS_REQUIRE=force DISPLAY=: \
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" \
+      -o LogLevel=ERROR -o PubkeyAuthentication=no -o ConnectTimeout=5 "$GUEST_USER@$(ip)" "$@"
+}
+
+loupe_host() { # the name on loupe's certificate, so the guest verifies it
+  echo | openssl s_client -connect "localhost:$LOUPE_PORT" 2>/dev/null \
+    | openssl x509 -noout -subject 2>/dev/null | sed -n 's/.*CN *= *//p'
+}
+
+cmd_up() {
+  if ! exists; then
+    log "cloning $VM_IMAGE to $VM_NAME"
+    "$TART" clone "$VM_IMAGE" "$VM_NAME"
+    "$TART" set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEMORY" --display "$VM_DISPLAY"
+  fi
+  if ! running; then
+    # Detached from this shell: no window on the host, survives the caller.
+    nohup "$TART" run --no-graphics "$VM_NAME" </dev/null >>"$VM_HOME/logs/tart-run.log" 2>&1 &
+    echo $! > "$VM_HOME/run/tart.pid"; disown
+    log "booting (pid $(cat "$VM_HOME/run/tart.pid"))"
+  fi
+  ip 180 >/dev/null || die "no IP after 180 s"
+  local i
+  for i in $(seq 60); do
+    g true 2>/dev/null && break
+    if pw_ssh "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < "$key.pub" 2>/dev/null; then continue; fi
+    sleep 3
+  done
+  g true || die "ssh to the guest failed"
+  cmd_setup
+  log "up at $(ip)"
+}
+
+# Idempotent guest setup: loupe's name, never sleep or lock, agent-desktop.
+cmd_setup() {
+  local host; host=$(loupe_host)
+  [ -n "$host" ] || die "could not read loupe's certificate on localhost:$LOUPE_PORT"
+  g "sudo /bin/sh -s" <<EOF
+set -e
+gw=\$(route -n get default | awk '/gateway:/ {print \$2}')
+sed -i '' '/ $host\$/d' /etc/hosts
+echo "\$gw $host" >> /etc/hosts
+pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 >/dev/null
+EOF
+  g "/bin/sh -s" <<'EOF'
+defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults write com.apple.screensaver askForPassword -int 0
+defaults write com.apple.screensaver askForPasswordDelay -int 0
+sudo sysadminctl -screenLock off -password admin >/dev/null 2>&1 || true
+mkdir -p ~/Applications ~/vm/rec
+EOF
+  # agent-desktop: the launcher and its macOS helper, both arm64.
+  tar -C "$AD_DIR" -cf - agent-desktop agent-desktop-darwin-arm64 \
+      agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
+    | g "sudo mkdir -p /usr/local/lib/agent-desktop && sudo tar -C /usr/local/lib/agent-desktop -xf - \
+         && sudo ln -sf /usr/local/lib/agent-desktop/agent-desktop /usr/local/bin/agent-desktop"
+}
+
+cmd_down() {
+  running || { log "not running"; return; }
+  g "sudo shutdown -h now" >/dev/null 2>&1 || true
+  local i; for i in $(seq 40); do running || break; sleep 2; done
+  running && "$TART" stop "$VM_NAME"
+  log "down"
+}
+
+cmd_status() {
+  local lock; lock=$(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>' || true)
+  echo "host screen locked: $([ "$lock" = 1 ] && echo yes || echo no)"
+  if ! exists; then echo "vm: $VM_NAME not created"; return; fi
+  if ! running; then echo "vm: $VM_NAME stopped"; return; fi
+  echo "vm: $VM_NAME running at $(ip)"
+  g "/bin/sh -s" <<'EOF'
+echo "guest: macOS $(sw_vers -productVersion), console user $(stat -f %Su /dev/console)"
+echo "autologin: $(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null || echo none)"
+echo "screensaver idleTime: $(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo unset)"
+echo "askForPassword: $(defaults read com.apple.screensaver askForPassword 2>/dev/null || echo unset)"
+echo "screenLock: $(sysadminctl -screenLock status 2>&1 | sed 's/.*] //')"
+pmset -g | awk '$1 ~ /^(sleep|displaysleep|disksleep)$/ {printf "pmset %s: %s\n", $1, $2}'
+echo "guest locked: $(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')"
+pgrep -x Handset >/dev/null && echo "Handset: running ($(cat ~/Applications/Handset.build 2>/dev/null))" || echo "Handset: not running"
+EOF
+}
+
+cmd_ssh() { if [ $# = 0 ]; then ssh -t "${sshopts[@]}" "$GUEST_USER@$(ip)"; else g "$@"; fi; }
+
+cmd_install() {
+  local app=${1:?usage: vm install <Handset.app> [build label]} label=${2:-}
+  [ -d "$app/Contents/MacOS" ] || die "$app is not an app bundle"
+  [ -n "$label" ] || label="$(basename "$app") built $(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$app/Contents/MacOS")"
+  cmd_quit >/dev/null 2>&1 || true
+  # tar keeps the bundle's symlinks; scp -r does not.
+  g "rm -rf $(q "$APP") && mkdir -p ~/Applications"
+  tar -C "$(dirname "$app")" -cf - -s "|^$(basename "$app")|Handset.app|" "$(basename "$app")" \
+    | g "tar -C ~/Applications -xf - && xattr -cr ~/Applications/Handset.app"
+  printf '%s\n' "$label" | g "cat > ~/Applications/Handset.build"
+  log "installed: $label"
+}
+
+cmd_run() {
+  local open=${1:-} host token
+  host=$(loupe_host); token=$(cat "$LOUPE_TOKEN_FILE")
+  cmd_quit >/dev/null 2>&1 || true
+  g "open -n -a $(q "$APP") --env $(q "LOUPE_SERVER=https://$host:$LOUPE_PORT") \
+     --env $(q "LOUPE_TOKEN=$token") --env $(q "LOUPE_OPEN=$open") ${HANDSET_ENV:+$(for e in $HANDSET_ENV; do printf -- '--env %q ' "$e"; done)}"
+  local i; for i in $(seq 30); do
+    g "agent-desktop list-windows --app Handset" 2>/dev/null | grep -q '"title"' && { log "Handset window up"; return; }
+    sleep 1
+  done
+  die "no Handset window after 30 s"
+}
+
+cmd_quit() {
+  g "agent-desktop close-app Handset >/dev/null 2>&1; sleep 1; pkill -x Handset; true"
+}
+
+cmd_ad() { g "agent-desktop $(q "$@")"; }
+
+cmd_record() {
+  case ${1:-} in
+    start)
+      local secs=${2:-60}
+      # The guest pauses whenever the host sleeps; hold the host awake.
+      nohup caffeinate -i -t $((secs + 30)) >/dev/null 2>&1 & echo $! > "$VM_HOME/run/caffeinate.pid"; disown
+      g "rm -f ~/vm/rec/current.mov; nohup screencapture -v -C -k -V $secs -x ~/vm/rec/current.mov \
+         >~/vm/rec/screencapture.log 2>&1 </dev/null & echo \$! > ~/vm/rec/pid"
+      sleep 1
+      g "kill -0 \$(cat ~/vm/rec/pid)" || die "screencapture did not start: $(g 'cat ~/vm/rec/screencapture.log')"
+      log "recording (max ${secs}s)"
+      ;;
+    stop)
+      local dir=${2:?usage: vm record stop <dir> [name]} name=${3:-guest-$(date +%Y%m%d-%H%M%S)}
+      mkdir -p "$dir"
+      g "p=\$(cat ~/vm/rec/pid); kill -INT \$p 2>/dev/null; for i in \$(seq 30); do kill -0 \$p 2>/dev/null || break; sleep 0.5; done"
+      g "cat ~/vm/rec/current.mov" > "$dir/$name.mov"
+      kill "$(cat "$VM_HOME/run/caffeinate.pid" 2>/dev/null)" 2>/dev/null || true
+      "$here/fps" "$dir/$name.mov" | tee "$dir/$name.fps.json"
+      ;;
+    *) die "usage: vm record start [secs] | stop <dir> [name]" ;;
+  esac
+}
+
+cmd_shot() {
+  local dir=${1:?usage: vm shot <dir> [name]} name=${2:-shot-$(date +%H%M%S)}
+  mkdir -p "$dir"
+  g "screencapture -x -t png ~/vm/rec/shot.png && cat ~/vm/rec/shot.png" > "$dir/$name.png"
+  echo "$dir/$name.png"
+}
+
+c=${1:-}; shift || true
+case $c in
+  up|down|status|ssh|setup|install|run|quit|ad|record|shot) "cmd_$c" "$@" ;;
+  *) sed -n 2,20p "$0"; exit 2 ;;
+esac
