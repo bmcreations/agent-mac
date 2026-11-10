@@ -1,16 +1,17 @@
 #!/bin/bash
-# One macOS guest VM (tart) for UI checks of the Mac Handset app: agents drive
-# Handset in the guest with agent-desktop and record the guest screen, so the
-# host's display, mouse and keyboard stay free and a locked host screen does
-# not stop the run. Devices stay on the host behind loupe. See README.md.
+# One headless macOS guest for UI checks of a Mac app: agents drive the app in
+# the guest with agent-desktop and record the guest screen, so the host's
+# display, mouse and keyboard stay free and a locked host screen does not stop
+# the run. See README.md.
 #
 #   vm up                      create (first time), boot headless, set up the guest
 #   vm down                    shut the guest down
 #   vm status                  VM state, IP, host lock, guest power/lock settings
 #   vm ssh [cmd...]            a shell, or one command, in the guest
-#   vm install <Handset.app> [build label]
-#   vm run [target,...]        start Handset against the host loupe, opening targets
-#   vm quit                    quit Handset in the guest
+#   vm install <App.app> [build label]
+#   vm run [--env K=V]... [-- args...]  start the installed app, wait for its window
+#   vm quit                    quit the installed app (only that copy)
+#   vm forward-host <name>     resolve <name> to the host in the guest's /etc/hosts
 #   vm ad <args...>            agent-desktop in the guest
 #   vm record start [secs]     record the guest screen (default 60 s max)
 #   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
@@ -22,20 +23,17 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
+repo=$here
 VM_HOME=${VM_HOME:-$repo/.vm}
-VM_NAME=${VM_NAME:-handset-agent}
+VM_NAME=${VM_NAME:-agent-vm}
 VM_IMAGE=${VM_IMAGE:-ghcr.io/cirruslabs/macos-golden-gate-base:latest}
 VM_CPU=${VM_CPU:-4}
 VM_MEMORY=${VM_MEMORY:-8192}
 VM_DISPLAY=${VM_DISPLAY:-1920x1200}
 TART=${TART:-$(command -v tart || echo "$HOME/.local/bin/tart")}
-LOUPE_PORT=${LOUPE_PORT:-18456}
-LOUPE_TOKEN_FILE=${LOUPE_TOKEN_FILE:-$HOME/Library/Caches/loupe/token}
 AD_DIR=${AD_DIR:-$(dirname "$(readlink -f "$(command -v agent-desktop)")")}
 GUEST_USER=admin GUEST_PASS=admin
-APP=/Users/$GUEST_USER/Applications/Handset.app
-JOB=dev.bmcreations.handset-vm.$VM_NAME
+JOB=dev.agent-vm.$VM_NAME
 job_plist=$VM_HOME/run/$JOB.plist
 
 mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run"
@@ -68,11 +66,6 @@ pw_ssh() {
   SSH_ASKPASS=$ask SSH_ASKPASS_REQUIRE=force DISPLAY=: \
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" \
       -o LogLevel=ERROR -o PubkeyAuthentication=no -o ConnectTimeout=5 "$GUEST_USER@$(ip)" "$@"
-}
-
-loupe_host() { # the name on loupe's certificate, so the guest verifies it
-  echo | openssl s_client -connect "localhost:$LOUPE_PORT" 2>/dev/null \
-    | openssl x509 -noout -subject 2>/dev/null | sed -n 's/.*CN *= *//p'
 }
 
 cmd_up() {
@@ -120,17 +113,9 @@ EOF
   log "up at $(ip)"
 }
 
-# Idempotent guest setup: loupe's name, never sleep or lock, agent-desktop.
+# Idempotent guest setup: never sleep or lock, the recorder, agent-desktop.
 cmd_setup() {
-  local host; host=$(loupe_host)
-  [ -n "$host" ] || die "could not read loupe's certificate on localhost:$LOUPE_PORT"
-  g "sudo /bin/sh -s" <<EOF
-set -e
-gw=\$(route -n get default | awk '/gateway:/ {print \$2}')
-sed -i '' '/ $host\$/d' /etc/hosts
-echo "\$gw $host" >> /etc/hosts
-pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 >/dev/null
-EOF
+  g "sudo pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 >/dev/null"
   g "/bin/sh -s" <<'EOF'
 defaults -currentHost write com.apple.screensaver idleTime -int 0
 defaults write com.apple.screensaver askForPassword -int 0
@@ -183,43 +168,68 @@ echo "askForPassword: $(defaults read com.apple.screensaver askForPassword 2>/de
 echo "screenLock: $(sysadminctl -screenLock status 2>&1 | sed 's/.*] //')"
 pmset -g | awk '$1 ~ /^(sleep|displaysleep|disksleep)$/ {printf "pmset %s: %s\n", $1, $2}'
 echo "guest locked: $(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')"
-pgrep -f "^$HOME/Applications/Handset.app/Contents/MacOS/Handset" >/dev/null && echo "Handset: running ($(cat ~/Applications/Handset.build 2>/dev/null))" || echo "Handset: not running"
+a=$(cat ~/Applications/.agent-vm-app 2>/dev/null); if [ -z "$a" ]; then echo "app: none installed"; elif pgrep -f "^$a/Contents/MacOS/" >/dev/null; then echo "app: $(basename "$a") running ($(cat ~/Applications/.agent-vm-build 2>/dev/null))"; else echo "app: $(basename "$a") not running"; fi
 EOF
 }
 
 cmd_ssh() { if [ $# = 0 ]; then ssh -t "${sshopts[@]}" "$GUEST_USER@$(ip)"; else g "$@"; fi; }
 
+# The installed app's path in the guest; install records it.
+app() { g "cat ~/Applications/.agent-vm-app 2>/dev/null"; }
+
 cmd_install() {
-  local app=${1:?usage: vm install <Handset.app> [build label]} label=${2:-}
-  [ -d "$app/Contents/MacOS" ] || die "$app is not an app bundle"
-  [ -n "$label" ] || label="$(basename "$app") built $(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$app/Contents/MacOS")"
+  local src=${1:?usage: vm install <App.app> [build label]} label=${2:-} name
+  [ -d "$src/Contents/MacOS" ] || die "$src is not an app bundle"
+  name=$(basename "$src")
+  [ -n "$label" ] || label="$name built $(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$src/Contents/MacOS")"
   cmd_quit >/dev/null 2>&1 || true
   # tar keeps the bundle's symlinks; scp -r does not.
-  g "rm -rf $(q "$APP") && mkdir -p ~/Applications"
-  tar -C "$(dirname "$app")" -cf - -s "|^$(basename "$app")|Handset.app|" "$(basename "$app")" \
-    | g "tar -C ~/Applications -xf - && xattr -cr ~/Applications/Handset.app"
-  printf '%s\n' "$label" | g "cat > ~/Applications/Handset.build"
+  g "rm -rf $(q "Applications/$name") && mkdir -p ~/Applications"
+  tar -C "$(dirname "$src")" -cf - "$name" | g "tar -C ~/Applications -xf - && xattr -cr $(q "Applications/$name")"
+  printf '%s\n' "$label" | g "cat > ~/Applications/.agent-vm-build"
+  printf '%s\n' "/Users/$GUEST_USER/Applications/$name" | g "cat > ~/Applications/.agent-vm-app"
   log "installed: $label"
 }
 
 cmd_run() {
-  local open=${1:-} host token
-  host=$(loupe_host); token=$(cat "$LOUPE_TOKEN_FILE")
+  local a envs=() args=() name
+  a=$(app); [ -n "$a" ] || die "nothing installed; run vm install first"
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --env) envs+=(--env "${2:?--env needs K=V}"); shift 2 ;;
+      --) shift; args=("$@"); break ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
   cmd_quit >/dev/null 2>&1 || true
-  g "open -n -a $(q "$APP") --env $(q "LOUPE_SERVER=https://$host:$LOUPE_PORT") \
-     --env $(q "LOUPE_TOKEN=$token") --env $(q "LOUPE_OPEN=$open") ${HANDSET_ENV:+$(for e in $HANDSET_ENV; do printf -- '--env %q ' "$e"; done)}"
+  g "open -n -a $(q "$a") ${envs[*]+$(q "${envs[@]}")} ${args[*]+--args $(q "${args[@]}")}"
+  name=$(basename "$a" .app)
   local i; for i in $(seq 30); do
-    g "agent-desktop list-windows --app Handset" 2>/dev/null | grep -q '"title"' && { log "Handset window up"; return; }
+    g "agent-desktop list-windows --app $(q "$name")" 2>/dev/null | grep -q '"title"' && { log "$name window up"; return; }
     sleep 1
   done
-  die "no Handset window after 30 s"
+  die "no $name window after 30 s"
 }
 
 cmd_quit() {
-  # Match the installed copy by path: other sessions run their own Handset
-  # builds in this guest under other paths, and a name match would kill those.
-  local exe="$APP/Contents/MacOS/Handset"
+  # Match the installed copy by path: another session's build of the same app
+  # under another path keeps running.
+  local a exe; a=$(app); [ -n "$a" ] || return 0
+  exe="$a/Contents/MacOS/$(basename "$a" .app)"
   g "pkill -TERM -f $(q "^$exe") || exit 0; for i in 1 2 3 4 5; do pgrep -f $(q "^$exe") >/dev/null || exit 0; sleep 1; done; pkill -KILL -f $(q "^$exe"); true"
+}
+
+# A guest app that verifies a host service's TLS certificate reaches it under
+# the certificate's own name: map that name to the guest's default gateway.
+cmd_forward_host() {
+  local name=${1:?usage: vm forward-host <hostname>}
+  g "sudo /bin/sh -s" <<EOF
+set -e
+gw=\$(route -n get default | awk '/gateway:/ {print \$2}')
+sed -i '' '/ $name\$/d' /etc/hosts
+echo "\$gw $name" >> /etc/hosts
+echo "$name -> \$gw"
+EOF
 }
 
 cmd_ad() { g "agent-desktop $(q "$@")"; }
@@ -268,5 +278,6 @@ cmd_shot() {
 c=${1:-}; shift || true
 case $c in
   up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync) "cmd_$c" "$@" ;;
-  *) sed -n 2,21p "$0"; exit 2 ;;
+  forward-host) cmd_forward_host "$@" ;;
+  *) sed -n 2,22p "$0"; exit 2 ;;
 esac
