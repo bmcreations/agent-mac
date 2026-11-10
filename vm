@@ -175,7 +175,7 @@ EOF
 cmd_ssh() { if [ $# = 0 ]; then ssh -t "${sshopts[@]}" "$GUEST_USER@$(ip)"; else g "$@"; fi; }
 
 # The installed app's path in the guest; install records it.
-app() { g "cat ~/Applications/.agent-vm-app 2>/dev/null"; }
+app() { g "cat ~/Applications/.agent-vm-app 2>/dev/null" || true; }
 
 cmd_install() {
   local src=${1:?usage: vm install <App.app> [build label]} label=${2:-} name
