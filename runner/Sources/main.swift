@@ -3,7 +3,10 @@
 //
 //   agent-vm-runner ipsw-url                    print the latest restore image URL for this host
 //   agent-vm-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
-//   agent-vm-runner run <bundle> [--recovery]   boot headless; exits when the guest stops
+//   agent-vm-runner run <bundle> [--recovery | --restore <state>]
+//                                               boot (or restore) headless; exits when the guest stops.
+//                                               SIGUSR1 saves state to <bundle>/state.vzvmsave and exits.
+//   agent-vm-runner can-save <bundle>           check the configuration supports save/restore
 //   agent-vm-runner mac <bundle>                print the guest's MAC address
 //
 // A bundle is a directory holding config.json, disk.img, aux.img, and the
@@ -36,6 +39,7 @@ struct Bundle {
     var aux: URL { dir.appendingPathComponent("aux.img") }
     var hardwareModel: URL { dir.appendingPathComponent("hardware-model.bin") }
     var machineIdentifier: URL { dir.appendingPathComponent("machine-identifier.bin") }
+    var state: URL { dir.appendingPathComponent("state.vzvmsave") }
 
     func loadConfig() -> Config {
         guard let data = try? Data(contentsOf: config),
@@ -177,7 +181,7 @@ final class Delegate: NSObject, VZVirtualMachineDelegate {
 }
 
 func run(_ args: [String]) {
-    guard let path = args.first else { die("usage: run <bundle> [--recovery]") }
+    guard let path = args.first else { die("usage: run <bundle> [--recovery | --restore <state>]") }
     let b = Bundle(dir: URL(fileURLWithPath: path))
     let c = b.loadConfig()
     let vm: VZVirtualMachine
@@ -198,11 +202,53 @@ func run(_ args: [String]) {
     }
     term.resume()
 
-    let options = VZMacOSVirtualMachineStartOptions()
-    options.startUpFromMacOSRecovery = args.contains("--recovery")
-    vm.start(options: options) { error in
-        if let error { die("could not start: \(error.localizedDescription)") }
-        log("running \(b.dir.lastPathComponent) (MAC \(c.mac))")
+    // SIGUSR1 pauses the guest, writes its memory and device state to
+    // <bundle>/state.vzvmsave, and exits. The disk must not change before the
+    // state is restored, so the caller snapshots disk.img after this exits.
+    signal(SIGUSR1, SIG_IGN)
+    let usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    usr1.setEventHandler {
+        log("saving state")
+        let t0 = Date()
+        vm.pause { result in
+            if case .failure(let error) = result {
+                log("could not pause: \(error.localizedDescription); still running")
+                return
+            }
+            try? FileManager.default.removeItem(at: b.state)
+            vm.saveMachineStateTo(url: b.state) { error in
+                if let error {
+                    // Keep the guest: a failed save must not cost the running session.
+                    // Saving needs the host unlocked: the state is encrypted with a
+                    // Secure Enclave key that can't be created while the screen is locked.
+                    try? FileManager.default.removeItem(at: b.state)
+                    log("could not save state: \(error.localizedDescription); resuming")
+                    vm.resume { _ in }
+                    return
+                }
+                log(String(format: "saved state in %.2f s", Date().timeIntervalSince(t0)))
+                vm.stop { _ in exit(0) }
+            }
+        }
+    }
+    usr1.resume()
+
+    if let restore = option(args, "--restore") {
+        let t0 = Date()
+        vm.restoreMachineStateFrom(url: URL(fileURLWithPath: restore)) { error in
+            if let error { die("could not restore: \(error.localizedDescription)") }
+            vm.resume { result in
+                if case .failure(let error) = result { die("could not resume: \(error.localizedDescription)") }
+                log(String(format: "restored \(b.dir.lastPathComponent) in %.2f s (MAC \(c.mac))", Date().timeIntervalSince(t0)))
+            }
+        }
+    } else {
+        let options = VZMacOSVirtualMachineStartOptions()
+        options.startUpFromMacOSRecovery = args.contains("--recovery")
+        vm.start(options: options) { error in
+            if let error { die("could not start: \(error.localizedDescription)") }
+            log("running \(b.dir.lastPathComponent) (MAC \(c.mac))")
+        }
     }
     withExtendedLifetime(delegate) { RunLoop.main.run() }
 }
@@ -212,12 +258,19 @@ switch args.first {
 case "ipsw-url": ipswURL()
 case "create": create(Array(args.dropFirst()))
 case "run": run(Array(args.dropFirst()))
+case "can-save":
+    // Exits 0 when this host and guest configuration support save/restore.
+    guard args.count > 1 else { die("usage: can-save <bundle>") }
+    let b = Bundle(dir: URL(fileURLWithPath: args[1]))
+    do { try makeConfiguration(b, b.loadConfig(), platform: savedPlatform(b)).validateSaveRestoreSupport(); print("yes") }
+    catch { die("save/restore not supported: \(error.localizedDescription)") }
 case "mac": print(Bundle(dir: URL(fileURLWithPath: args.count > 1 ? args[1] : ".")).loadConfig().mac)
 default:
     FileHandle.standardError.write("""
     usage: agent-vm-runner ipsw-url
            agent-vm-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
-           agent-vm-runner run <bundle> [--recovery]
+           agent-vm-runner run <bundle> [--recovery | --restore <state>]
+           agent-vm-runner can-save <bundle>
            agent-vm-runner mac <bundle>
 
     """.data(using: .utf8)!)
