@@ -10,6 +10,8 @@
 #                              the flags fix the guest's screen (points, HiDPI), look and
 #                              language, and stay set for later vm up
 #   vm down                    shut the guest down
+#   vm save [name]             save the running guest's memory and disks, and stop it
+#   vm restore [name]          resume a saved guest where it was (cold boot if it can't)
 #   vm prepare [--rebuild]     build the set-up guest that new guests copy
 #   vm status                  guest state, IP, host lock, guest power/lock settings
 #   vm ssh [cmd...]            a shell, or one command, in the guest
@@ -79,7 +81,9 @@ PY3
 }
 # The runner is started with the bundle's absolute path, which provision's
 # running-guest guard matches too.
-running() { pgrep -f "agent-vm-runner run $bundle\$" >/dev/null; }
+# The runner for this guest, booted or restored (run <bundle> --restore <state>).
+runner_pat="agent-vm-runner run $bundle( |\$)"
+running() { pgrep -f "$runner_pat" >/dev/null; }
 done_step() { grep -qx "$1" "$state" 2>/dev/null; }
 mark() { echo "$1" >> "$state"; }
 
@@ -144,15 +148,17 @@ job_reload() {
 # A launchd job, not a child of this shell: it outlives the caller (an agent
 # harness reaps its process group). ExitTimeOut leaves the guest time to shut
 # down when the job is booted out.
+# boot [--restore <state>]: start the runner as a launchd job.
 boot() {
-  local plist=$VM_HOME/run/$JOB.plist
+  local plist=$VM_HOME/run/$JOB.plist extra=""
+  [ "${1:-}" = --restore ] && extra="<string>--restore</string><string>$2</string>"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$JOB</string>
   <key>ProgramArguments</key><array>
-    <string>$RUNNER</string><string>run</string><string>$bundle</string>
+    <string>$RUNNER</string><string>run</string><string>$bundle</string>$extra
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
@@ -162,6 +168,7 @@ boot() {
 </dict></plist>
 EOF
   job_reload "$JOB" "$plist"
+  [ -n "$extra" ] && return
   log "booting $VM_NAME"
   ip 180 >/dev/null || die "no IP after 180 s (see $VM_HOME/logs/$VM_NAME-run.log)"
   local i; for i in $(seq 90); do g true 2>/dev/null && return; sleep 2; done
@@ -173,8 +180,8 @@ shutdown_guest() {
   g "sudo shutdown -h now" >/dev/null 2>&1 || true
   local i; for i in $(seq 60); do running || break; sleep 2; done
   # The runner asks the guest to stop on the first TERM and stops it on the second.
-  running && { pkill -TERM -f "agent-vm-runner run $bundle\$"; sleep 20; }
-  running && pkill -TERM -f "agent-vm-runner run $bundle\$"
+  running && { pkill -TERM -f "$runner_pat"; sleep 20; }
+  running && pkill -TERM -f "$runner_pat"
   launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
 }
 
@@ -346,6 +353,9 @@ cmd_status() {
   echo "host screen locked: $([ "$lock" = 1 ] && echo yes || echo no)"
   if ! exists; then echo "vm: $VM_NAME not created"; return; fi
   echo "provisioned: $(tr '\n' ' ' < "$state" 2>/dev/null)"
+  local sn; for sn in "$snaps"/*/state.vzvmsave; do
+    [ -f "$sn" ] && echo "snapshot: $(basename "$(dirname "$sn")") saved $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$sn"), state $(du -h "$sn" | cut -f1)"
+  done
   if ! running; then echo "vm: $VM_NAME stopped"; return; fi
   echo "vm: $VM_NAME running at $(ip || echo '(no IP yet)')"
   if [ -f "$hold" ]; then echo "hold: a person has control since $(cat "$hold"); agent input refuses (exit $HELD)"; else echo "hold: none"; fi
@@ -522,6 +532,75 @@ json.dump({"start_epoch": t0, "hz": hz, "actions": out}, sys.stdout, indent=1)
 print()' "$1"
 }
 
+# Snapshots: the runner's saved memory and device state, with APFS clones of
+# the disks and config as they were when it was saved. The state is only valid
+# against those disks, so restoring puts them back too, and one snapshot can be
+# restored again and again. Clones share blocks until the disks diverge.
+snaps=$bundle/snapshots
+host_locked() { [ "$(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')" = 1 ]; }
+recording() { g "kill -0 \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null" 2>/dev/null; }
+
+cmd_save() {
+  local name=${1:-default} log=$VM_HOME/logs/$VM_NAME-run.log pid off
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "snapshot names use letters, digits, . _ -"
+  running || die "$VM_NAME is not running"
+  refuse_if_held save
+  recording && die "a recording is running; vm record stop first"
+  "$RUNNER" can-save "$bundle" >/dev/null || die "this guest's configuration can't be saved"
+  # The runner encrypts the state with a Secure Enclave key, which can't be
+  # made while the host screen is locked.
+  host_locked && die "the host screen is locked; saving needs it unlocked ($VM_NAME keeps running)"
+  view_stop >/dev/null 2>&1 || true
+  off=$(wc -c < "$log"); pid=$(pgrep -f "$runner_pat" | head -1)
+  kill -USR1 "$pid"
+  local i; for i in $(seq 240); do
+    kill -0 "$pid" 2>/dev/null || break
+    tail -c +$((off + 1)) "$log" | grep -Eq 'resuming$|still running$' && break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    local why; why=$(tail -c +$((off + 1)) "$log" | grep 'could not' | tail -1)
+    die "not saved, $VM_NAME is still running: ${why:-no reply from the runner}"
+  fi
+  [ -s "$bundle/state.vzvmsave" ] || die "the runner exited without a saved state; see $log"
+  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  rm -rf "$snaps/$name.tmp"; mkdir -p "$snaps/$name.tmp"
+  mv "$bundle/state.vzvmsave" "$snaps/$name.tmp/"
+  cp -c "$bundle/disk.img" "$bundle/aux.img" "$bundle/config.json" "$snaps/$name.tmp/"
+  rm -rf "$snaps/$name"; mv "$snaps/$name.tmp" "$snaps/$name"
+  log "saved $VM_NAME as $name ($(tail -c +$((off + 1)) "$log" | sed -n 's/.*saved state in //p' | tail -1)); $(du -sh "$snaps/$name/state.vzvmsave" | cut -f1) of state; vm restore $name resumes it"
+}
+
+cmd_restore() {
+  local name=${1:-default} log=$VM_HOME/logs/$VM_NAME-run.log off snap
+  snap=$snaps/$name
+  [ -s "$snap/state.vzvmsave" ] || die "no snapshot $name of $VM_NAME; saved: $(ls "$snaps" 2>/dev/null | tr '\n' ' ')"
+  refuse_if_held restore
+  view_stop >/dev/null 2>&1 || true
+  running && shutdown_guest
+  # Keep the current disks, to fall back to a cold boot on them.
+  local f; for f in disk.img aux.img config.json; do cp -c "$bundle/$f" "$bundle/$f.pre-restore"; cp -c "$snap/$f" "$bundle/$f"; done
+  off=$(wc -c < "$log" 2>/dev/null || echo 0)
+  boot --restore "$snap/state.vzvmsave"
+  local i ok=0; for i in $(seq 120); do
+    tail -c +$((off + 1)) "$log" 2>/dev/null | grep -q '^.*restored ' && { ok=1; break; }
+    running || break
+    sleep 0.5
+  done
+  if [ "$ok" = 1 ]; then
+    for f in disk.img aux.img config.json; do rm -f "$bundle/$f.pre-restore"; done
+    for i in $(seq 60); do g true 2>/dev/null && break; sleep 1; done
+    log "restored $name ($(tail -c +$((off + 1)) "$log" | sed -n 's/.*restored [^ ]* in \([0-9.]* s\).*/\1/p' | tail -1)), up at $(ip)"
+    return
+  fi
+  local why; why=$(tail -c +$((off + 1)) "$log" 2>/dev/null | grep 'could not' | tail -1)
+  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  for f in disk.img aux.img config.json; do mv "$bundle/$f.pre-restore" "$bundle/$f"; done
+  log "could not restore $name (${why:-runner exited}); booting $VM_NAME cold instead"
+  boot
+  log "up at $(ip) (cold boot; the snapshot is kept)"
+}
+
 cmd_vsync() { g "~/vm/bin/vsync ${1:-10}"; }
 
 cmd_shot() {
@@ -629,7 +708,7 @@ view_stop() {
 
 c=${1:-}; shift || true
 case $c in
-  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view|prepare) "cmd_$c" "$@" ;;
+  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view|prepare|save|restore) "cmd_$c" "$@" ;;
   forward-host) cmd_forward_host "$@" ;;
   help|-h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- >&2; exit 2 ;;
