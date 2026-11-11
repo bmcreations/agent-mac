@@ -462,7 +462,7 @@ cmd_ad() {
   # During a recording, stamp the call's start and end on the guest clock, so
   # vm record stop can line it up with the frames.
   local args; args=$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
-  g "if kill -0 \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null; then
+  g "if ps -o command= -p \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null | grep -q vm/bin/rec; then
        now() { perl -MTime::HiRes=time -e 'printf \"%.3f\", time'; }
        s=\$(now); agent-desktop $(q "$@"); rc=\$?; e=\$(now)
        printf '{\"start\":%s,\"end\":%s,\"rc\":%d,\"args\":%s}\\n' \$s \$e \$rc $(q "$args") >> ~/vm/rec/current.actions.jsonl
@@ -546,7 +546,7 @@ print()' "$1"
 # restored again and again. Clones share blocks until the disks diverge.
 snaps=$bundle/snapshots
 host_locked() { [ "$(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')" = 1 ]; }
-recording() { g "kill -0 \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null" 2>/dev/null; }
+recording() { g "ps -o command= -p \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null | grep -q vm/bin/rec" 2>/dev/null; }
 
 cmd_save() {
   local name=${1:-default} log=$VM_HOME/logs/$VM_NAME-run.log pid off
