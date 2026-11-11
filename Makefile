@@ -13,7 +13,7 @@ runner:
 # The guest's recorder and refresh counter, built for the release.
 guest-bin:
 	mkdir -p guest-bin
-	for t in rec vsync; do xcrun swiftc -O -target arm64-apple-macos14 -o guest-bin/$$t guest/$$t.swift; done
+	for t in rec vsync display; do xcrun swiftc -O -target arm64-apple-macos14 -o guest-bin/$$t guest/$$t.swift; done
 
 # The release tarball: scripts, skills and the built binaries, so a Homebrew
 # install needs no compiler.

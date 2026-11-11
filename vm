@@ -5,7 +5,10 @@
 # the run. People watch or drive the same guest in a browser with voxl. See
 # README.md.
 #
-#   vm up                      create (first time), provision, boot headless, set up
+#   vm up [--display WxH] [--appearance dark|light] [--locale ll_CC]
+#                              create (first time), provision, boot headless, set up;
+#                              the flags fix the guest's screen (points, HiDPI), look and
+#                              language, and stay set for later vm up
 #   vm down                    shut the guest down
 #   vm prepare [--rebuild]     build the set-up guest that new guests copy
 #   vm status                  guest state, IP, host lock, guest power/lock settings
@@ -59,6 +62,18 @@ die() { echo "vm: $*" >&2; exit 1; }
 log() { echo "vm: $*" >&2; }
 
 exists() { [ -f "$bundle/config.json" ]; }
+# A key of the guest's config.json; empty when unset.
+conf() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$bundle/config.json" "$1"; }
+# Set keys in config.json: conf_set k=v... (an integer value is stored as one).
+conf_set() {
+  python3 -I - "$bundle/config.json" "$@" <<'PY3'
+import json, sys
+p = sys.argv[1]; c = json.load(open(p))
+for kv in sys.argv[2:]:
+    k, v = kv.split("=", 1); c[k] = int(v) if v.isdigit() else v
+json.dump(c, open(p, "w"))
+PY3
+}
 # The runner is started with the bundle's absolute path, which provision's
 # running-guest guard matches too.
 running() { pgrep -f "agent-vm-runner run $bundle\$" >/dev/null; }
@@ -193,6 +208,18 @@ cmd_prepare() {
 
 # Each step is recorded in the bundle, so an interrupted vm up resumes.
 cmd_up() {
+  local display="" appearance="" locale=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --display) display=${2:?--display needs WxH}; shift 2
+        [[ $display =~ ^[0-9]+x[0-9]+$ ]] || die "--display wants WxH in points, e.g. 1440x900" ;;
+      --appearance) appearance=${2:?--appearance needs dark or light}; shift 2
+        case $appearance in dark|light) ;; *) die "--appearance wants dark or light" ;; esac ;;
+      --locale) locale=${2:?--locale needs a locale like de_DE}; shift 2
+        [[ $locale =~ ^[a-z]{2,3}(_[A-Z]{2})?$ ]] || die "--locale wants a locale like de_DE" ;;
+      *) die "usage: vm up [--display WxH] [--appearance dark|light] [--locale ll_CC]" ;;
+    esac
+  done
   [ -x "$RUNNER" ] || die "no runner at $RUNNER; run make runner"
   if ! exists; then
     if [ ! -f "$base/config.json" ] || ! grep -qx installed "$base/agent-vm.state" 2>/dev/null; then
@@ -231,6 +258,17 @@ cmd_up() {
     as_root env GUEST_USER=$GUEST_USER "$here/provision" tcc "$bundle"
     mark tcc
   fi
+  # The environment flags stick in config.json, so a later vm up keeps them.
+  [ -n "$appearance" ] && conf_set appearance="$appearance"
+  [ -n "$locale" ] && conf_set locale="$locale"
+  if [ -n "$display" ]; then
+    # The runner's display is fixed at boot: 2x the points, so the guest runs HiDPI.
+    local w=$((2 * ${display%x*})) h=$((2 * ${display#*x}))
+    if [ "$(conf width)x$(conf height)" != "${w}x$h" ]; then
+      conf_set display="$display" width=$w height=$h
+      running && { log "restarting $VM_NAME for the new display size"; shutdown_guest; }
+    else conf_set display="$display"; fi
+  fi
   running || boot
   # Autologin: the desktop belongs to the guest user before anything captures it.
   local i; for i in $(seq 60); do [ "$(g 'stat -f %Su /dev/console')" = "$GUEST_USER" ] && break; sleep 2; done
@@ -254,7 +292,7 @@ mkdir -p ~/Applications ~/vm/rec ~/vm/bin
 EOF
   mkdir -p "$VM_HOME/bin"
   local t bin
-  for t in vsync rec; do
+  for t in vsync rec display; do
     # A release ships them built; a checkout compiles them once.
     bin=$here/guest-bin/$t
     if [ ! -x "$bin" ]; then
@@ -271,6 +309,25 @@ EOF
       agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
     | g "sudo mkdir -p /usr/local/lib/agent-desktop /usr/local/bin && sudo tar -C /usr/local/lib/agent-desktop -xf - \
          && sudo ln -sf /usr/local/lib/agent-desktop/agent-desktop /usr/local/bin/agent-desktop"
+  setup_env
+}
+
+# The fixed environment vm up stored: display mode, appearance, locale. Apps
+# read the locale when they start, so vm run picks it up; appearance and the
+# display mode change live.
+setup_env() {
+  local display appearance locale args=()
+  display=$(conf display); appearance=$(conf appearance); locale=$(conf locale)
+  [ -n "$display" ] && args+=(--size "$display")
+  [ -n "$appearance" ] && args+=(--appearance "$appearance")
+  if [ ${#args[@]} -gt 0 ]; then
+    local i; for i in 1 2 3 4 5; do g "~/vm/bin/display $(q "${args[@]}")" >/dev/null 2>&1 && break; sleep 2; done
+    g "~/vm/bin/display $(q "${args[@]}")" | sed 's/^/guest /' >&2
+  fi
+  if [ -n "$locale" ]; then
+    g "defaults write -g AppleLocale $(q "$locale") && defaults write -g AppleLanguages -array $(q "${locale/_/-}")"
+    log "guest locale $locale (apps started from now on)"
+  fi
 }
 
 cmd_down() {
