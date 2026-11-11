@@ -2,11 +2,12 @@
 # One headless macOS guest for UI checks of a Mac app: agents drive the app in
 # the guest with agent-desktop and record the guest screen, so the host's
 # display, mouse and keyboard stay free and a locked host screen does not stop
-# the run. See README.md.
+# the run. People watch or drive the same guest in a browser with voxl. See
+# README.md.
 #
-#   vm up                      create (first time), boot headless, set up the guest
+#   vm up                      create (first time), provision, boot headless, set up
 #   vm down                    shut the guest down
-#   vm status                  VM state, IP, host lock, guest power/lock settings
+#   vm status                  guest state, IP, host lock, guest power/lock settings
 #   vm ssh [cmd...]            a shell, or one command, in the guest
 #   vm install <App.app> [build label]
 #   vm run [--env K=V]... [-- args...]  start the installed app, wait for its window
@@ -17,140 +18,216 @@
 #   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
 #   vm shot <dir> [name]       one guest screenshot into <dir>
 #   vm vsync [secs]            guest display refreshes per second (compositing check)
+#   vm view [--control] [--remote]  open the guest desktop in a browser (voxl)
+#   vm view stop               stop voxl and its forwards
 #
-# VM_HOME (default <repo>/.vm) holds the ssh key, logs and run state.
-# TART (default `tart` on PATH, else ~/.local/bin/tart). VM_NAME, VM_IMAGE.
+# VM_HOME (default <repo>/.vm) holds the restore image, guests, ssh key and logs.
+# VM_NAME (default agent-vm) names the guest; VM_CPU, VM_MEMORY_MB, VM_DISK_GB.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$here
-VM_HOME=${VM_HOME:-$repo/.vm}
+VM_HOME=${VM_HOME:-$here/.vm}
 VM_NAME=${VM_NAME:-agent-vm}
-VM_IMAGE=${VM_IMAGE:-ghcr.io/cirruslabs/macos-golden-gate-base:latest}
 VM_CPU=${VM_CPU:-4}
-VM_MEMORY=${VM_MEMORY:-8192}
-VM_DISPLAY=${VM_DISPLAY:-1920x1200}
-TART=${TART:-$(command -v tart || echo "$HOME/.local/bin/tart")}
-AD_DIR=${AD_DIR:-$(dirname "$(readlink -f "$(command -v agent-desktop)")")}
+VM_MEMORY_MB=${VM_MEMORY_MB:-8192}
+VM_DISK_GB=${VM_DISK_GB:-80}
+RUNNER=${RUNNER:-$here/runner/.build/release/agent-vm-runner}
+VOXL_VERSION=${VOXL_VERSION:-0.3.4}
+VIEW_PORT=${VIEW_PORT:-16901}
 GUEST_USER=admin GUEST_PASS=admin
+guests=$VM_HOME/guests
+base=$guests/base.bundle
+bundle=$guests/$VM_NAME.bundle
+state=$bundle/agent-vm.state
 JOB=dev.agent-vm.$VM_NAME
-job_plist=$VM_HOME/run/$JOB.plist
+VIEW_JOB=$JOB.view
 
-mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run"
+mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run" "$VM_HOME/ipsw" "$guests"
 key=$VM_HOME/ssh/id_ed25519
 [ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -C "$VM_NAME" -f "$key"
 
 die() { echo "vm: $*" >&2; exit 1; }
 log() { echo "vm: $*" >&2; }
 
-exists() { "$TART" list --format json | python3 -c '
-import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] for v in json.load(sys.stdin)) else 1)' "${1:-$VM_NAME}"; }
-running() { "$TART" list --format json | python3 -c '
-import json, sys; sys.exit(0 if any(v["Name"] == sys.argv[1] and v["State"] == "running" for v in json.load(sys.stdin)) else 1)' "$VM_NAME"; }
-ip() { "$TART" ip "$VM_NAME" --wait "${1:-5}"; }
+exists() { [ -f "$bundle/config.json" ]; }
+# The runner is started with the bundle's absolute path, which provision's
+# running-guest guard matches too.
+running() { pgrep -f "agent-vm-runner run $bundle\$" >/dev/null; }
+done_step() { grep -qx "$1" "$state" 2>/dev/null; }
+mark() { echo "$1" >> "$state"; }
+
+# The guest's IP from the host's DHCP leases. The file drops leading zeros in
+# each MAC byte and keeps old leases, so take the newest match.
+ip_now() {
+  python3 -I - "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["mac"])' "$bundle/config.json")" <<'PY'
+import re, sys
+mac = ":".join(b.lstrip("0") or "0" for b in sys.argv[1].lower().split(":"))
+try: text = open("/var/db/dhcpd_leases").read()
+except OSError: sys.exit(1)
+best = None
+for block in re.findall(r"\{(.*?)\}", text, re.S):
+    f = dict(re.findall(r"^\s*(\w+)=(.*)$", block, re.M))
+    if f.get("hw_address", "").split(",", 1)[-1].lower() == mac:
+        lease = int(f.get("lease", "0x0"), 16)
+        if best is None or lease > best[0]: best = (lease, f["ip_address"])
+if not best: sys.exit(1)
+print(best[1])
+PY
+}
+ip() {
+  local i; for i in $(seq "${1:-5}"); do ip_now 2>/dev/null && return; sleep 1; done
+  return 1
+}
 
 sshopts=(-i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
   -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" -o LogLevel=ERROR
   -o ConnectTimeout=5 -o ServerAliveInterval=10)
 # Run in the guest. ssh's PATH lacks /usr/local/bin, where agent-desktop goes.
-g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" 'export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH;' "$@"; }
+g() { ssh "${sshopts[@]}" "$GUEST_USER@$(ip)" 'export PATH=/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin:$PATH;' "$@"; }
 q() { printf '%q ' "$@"; }                               # quote for the remote shell
-# Guest shell snippet: press Allow on replayd's screen capture alert if it is
-# up, polling up to ~2 s; prints "allowed" when it pressed it.
-allow_js='for i in 1 2 3 4; do n=$(osascript -e "tell application \"System Events\" to count windows of process \"UserNotificationCenter\"" 2>/dev/null); if [ "${n:-0}" -gt 0 ] && osascript -e "tell application \"System Events\" to tell process \"UserNotificationCenter\" to click button \"Allow\" of window 1" >/dev/null 2>&1; then echo allowed; break; fi; sleep 0.5; done'
 
-# The base image's admin/admin, used once to install the key.
-pw_ssh() {
-  local ask=$VM_HOME/ssh/askpass
-  printf '#!/bin/sh\necho %s\n' "$GUEST_PASS" > "$ask"; chmod 700 "$ask"
-  SSH_ASKPASS=$ask SSH_ASKPASS_REQUIRE=force DISPLAY=: \
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile="$VM_HOME/ssh/known_hosts" \
-      -o LogLevel=ERROR -o PubkeyAuthentication=no -o ConnectTimeout=5 "$GUEST_USER@$(ip)" "$@"
+# provision writes root-owned files onto the guest's disk, so it runs as root.
+# An agent's shell can't answer a password prompt: fail now, not mid-run.
+as_root() {
+  if sudo -n true 2>/dev/null; then sudo -n "$@"
+  elif [ -n "${SUDO_ASKPASS:-}" ]; then sudo -A "$@"
+  else die "provisioning needs root on the host: run 'sudo -v' in this terminal, or set SUDO_ASKPASS, then rerun vm up"
+  fi
 }
 
-cmd_up() {
-  if ! exists; then
-    # fetch-image resumes after an outage, where tart pull starts over.
-    local src="127.0.0.1:${FETCH_PORT:-5917}/${VM_IMAGE#ghcr.io/}"
-    # Parse the JSON: tart escapes the slashes in names ("127.0.0.1:5917\/…").
-    if ! exists "$src"; then
-      caffeinate -i "$here/fetch-image" "$VM_HOME/oci" "$VM_IMAGE" >/dev/null
-    fi
-    log "cloning $src to $VM_NAME"
-    "$TART" clone "$src" "$VM_NAME"
-    "$TART" set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEMORY" --display "$VM_DISPLAY"
+restore_image() {
+  local f; f=$(ls "$VM_HOME"/ipsw/*.ipsw 2>/dev/null | tail -1 || true)
+  if [ -z "$f" ]; then
+    local url; url=$("$RUNNER" ipsw-url)
+    f=$VM_HOME/ipsw/$(basename "$url")
+    log "downloading $(basename "$url") (about 25 GB; rerun to resume)"
+    caffeinate -i curl -fL --retry 5 -C - -o "$f.part" "$url" >&2
+    mv "$f.part" "$f"
   fi
-  if ! running; then
-    # A launchd job, not a child of this shell: no window on the host, and it
-    # outlives the caller (an agent harness reaps its process group).
-    cat > "$job_plist" <<EOF
+  echo "$f"
+}
+
+# bootout returns before the job is gone, and bootstrap then fails with EIO.
+job_reload() {
+  launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
+  local i; for i in $(seq 50); do launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1 || break; sleep 0.2; done
+  launchctl bootstrap "gui/$(id -u)" "$2"
+}
+
+# A launchd job, not a child of this shell: it outlives the caller (an agent
+# harness reaps its process group). ExitTimeOut leaves the guest time to shut
+# down when the job is booted out.
+boot() {
+  local plist=$VM_HOME/run/$JOB.plist
+  cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$JOB</string>
   <key>ProgramArguments</key><array>
-    <string>$TART</string><string>run</string><string>--no-graphics</string><string>$VM_NAME</string>
+    <string>$RUNNER</string><string>run</string><string>$bundle</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
-  <key>StandardOutPath</key><string>$VM_HOME/logs/tart-run.log</string>
-  <key>StandardErrorPath</key><string>$VM_HOME/logs/tart-run.log</string>
+  <key>ExitTimeOut</key><integer>120</integer>
+  <key>StandardOutPath</key><string>$VM_HOME/logs/$VM_NAME-run.log</string>
+  <key>StandardErrorPath</key><string>$VM_HOME/logs/$VM_NAME-run.log</string>
 </dict></plist>
 EOF
-    launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$job_plist"
-    log "booting (launchd job $JOB)"
+  job_reload "$JOB" "$plist"
+  log "booting $VM_NAME"
+  ip 180 >/dev/null || die "no IP after 180 s (see $VM_HOME/logs/$VM_NAME-run.log)"
+  local i; for i in $(seq 90); do g true 2>/dev/null && return; sleep 2; done
+  die "no ssh to the guest after 180 s"
+}
+
+shutdown_guest() {
+  running || { launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true; return; }
+  g "sudo shutdown -h now" >/dev/null 2>&1 || true
+  local i; for i in $(seq 60); do running || break; sleep 2; done
+  # The runner asks the guest to stop on the first TERM and stops it on the second.
+  running && { pkill -TERM -f "agent-vm-runner run $bundle\$"; sleep 20; }
+  running && pkill -TERM -f "agent-vm-runner run $bundle\$"
+  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+}
+
+# Each step is recorded in the bundle, so an interrupted vm up resumes.
+cmd_up() {
+  [ -x "$RUNNER" ] || die "no runner at $RUNNER; run make runner"
+  if ! exists; then
+    if [ ! -f "$base/config.json" ] || ! grep -qx installed "$base/agent-vm.state" 2>/dev/null; then
+      local img; img=$(restore_image)
+      rm -rf "$base"
+      log "installing macOS into $base (10-20 min)"
+      caffeinate -i "$RUNNER" create "$base" "$img" --disk-gb "$VM_DISK_GB" --cpu "$VM_CPU" --memory-mb "$VM_MEMORY_MB"
+      echo installed > "$base/agent-vm.state"
+    fi
+    # An APFS clone: instant, and it takes space only as the copies differ.
+    cp -cR "$base" "$bundle.tmp"
+    : > "$bundle.tmp/agent-vm.state"
+    python3 -I - "$bundle.tmp/config.json" <<'PY'
+import json, random, sys
+p = sys.argv[1]; c = json.load(open(p))
+c["mac"] = ":".join(["%02x" % ((random.randrange(256) | 2) & 0xfe)] + ["%02x" % random.randrange(256) for _ in range(5)])
+json.dump(c, open(p, "w"))
+PY
+    mv "$bundle.tmp" "$bundle"
+    log "created $VM_NAME from the base install"
   fi
-  ip 180 >/dev/null || die "no IP after 180 s"
-  local i
-  for i in $(seq 60); do
-    g true 2>/dev/null && break
-    if pw_ssh "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < "$key.pub" 2>/dev/null; then continue; fi
-    sleep 3
-  done
-  g true || die "ssh to the guest failed"
+  if ! done_step base; then
+    running && die "$VM_NAME is running but not provisioned; vm down first"
+    as_root env GUEST_USER=$GUEST_USER GUEST_PASS=$GUEST_PASS "$here/provision" base "$bundle" "$key.pub"
+    mark base
+  fi
+  if ! done_step firstboot; then
+    running || boot
+    # sshd starts partway through firstboot.sh; wait for the whole script.
+    local i; for i in $(seq 60); do g "test -f /Library/agent-vm/firstboot.done" 2>/dev/null && break; sleep 2; done
+    g "test -f /Library/agent-vm/firstboot.done" || die "first-boot setup did not finish; see /var/log/agent-vm-firstboot.log in the guest"
+    shutdown_guest
+    mark firstboot
+  fi
+  if ! done_step tcc; then
+    running && shutdown_guest
+    as_root env GUEST_USER=$GUEST_USER "$here/provision" tcc "$bundle"
+    mark tcc
+  fi
+  running || boot
+  # Autologin: the desktop belongs to the guest user before anything captures it.
+  local i; for i in $(seq 60); do [ "$(g 'stat -f %Su /dev/console')" = "$GUEST_USER" ] && break; sleep 2; done
   cmd_setup
   log "up at $(ip)"
 }
 
 # Idempotent guest setup: never sleep or lock, the recorder, agent-desktop.
 cmd_setup() {
-  g "sudo pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 >/dev/null"
-  g "/bin/sh -s" <<'EOF'
+  g "/bin/sh -s" <<EOF
 defaults -currentHost write com.apple.screensaver idleTime -int 0
 defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0
-sudo sysadminctl -screenLock off -password admin >/dev/null 2>&1 || true
-mkdir -p ~/Applications ~/vm/rec
+sudo sysadminctl -screenLock off -password $GUEST_PASS >/dev/null 2>&1 || true
+mkdir -p ~/Applications ~/vm/rec ~/vm/bin
 EOF
-  # vsync: display refreshes per second, to see the guest is compositing.
   mkdir -p "$VM_HOME/bin"
-  [ "$VM_HOME/bin/vsync" -nt "$here/guest/vsync.swift" ] ||
-    xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/vsync" "$here/guest/vsync.swift"
-  g "mkdir -p ~/vm/bin && cat > ~/vm/bin/vsync && chmod +x ~/vm/bin/vsync" < "$VM_HOME/bin/vsync"
-  # rec: constant-frame-rate recorder (screencapture -v hangs on a still screen).
-  [ "$VM_HOME/bin/rec" -nt "$here/guest/rec.swift" ] ||
-    xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/rec" "$here/guest/rec.swift"
-  g "cat > ~/vm/bin/rec && chmod +x ~/vm/bin/rec" < "$VM_HOME/bin/rec"
-  # Screen capture over ssh counts against sshd-keygen-wrapper, which the base
-  # image grants in TCC.db. replayd still raises a "bypass the system private
-  # window picker" alert over the desktop on a video capture until someone
-  # presses Allow; writing its ScreenCaptureApprovals.plist did not stop it.
-  # Take a short capture now and press Allow, so it is not in a recording.
-  g "~/vm/bin/rec ~/vm/rec/warmup.mov 2 >/dev/null 2>&1 </dev/null & sleep 1; $allow_js; wait; rm -f ~/vm/rec/warmup.mov ~/vm/rec/warmup.ticks.json"
-  # agent-desktop: the launcher and its macOS helper, both arm64.
-  tar -C "$AD_DIR" -cf - agent-desktop agent-desktop-darwin-arm64 \
+  local t
+  for t in vsync rec; do
+    [ "$VM_HOME/bin/$t" -nt "$here/guest/$t.swift" ] ||
+      xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/$t" "$here/guest/$t.swift"
+    g "cat > ~/vm/bin/$t && chmod +x ~/vm/bin/$t" < "$VM_HOME/bin/$t"
+  done
+  # agent-desktop: the host's copy, the launcher and its macOS helper (arm64).
+  local ad; ad=$(command -v agent-desktop || true)
+  [ -n "$ad" ] || die "agent-desktop is not on the host's PATH (brew install agent-desktop)"
+  tar -C "$(dirname "$(readlink -f "$ad")")" -cf - agent-desktop agent-desktop-darwin-arm64 \
       agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
     | g "sudo mkdir -p /usr/local/lib/agent-desktop /usr/local/bin && sudo tar -C /usr/local/lib/agent-desktop -xf - \
          && sudo ln -sf /usr/local/lib/agent-desktop/agent-desktop /usr/local/bin/agent-desktop"
 }
 
 cmd_down() {
+  view_stop >/dev/null 2>&1 || true
   running || { log "not running"; return; }
-  g "sudo shutdown -h now" >/dev/null 2>&1 || true
-  local i; for i in $(seq 40); do running || break; sleep 2; done
-  running && "$TART" stop "$VM_NAME"
-  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  shutdown_guest
   log "down"
 }
 
@@ -158,17 +235,18 @@ cmd_status() {
   local lock; lock=$(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>' || true)
   echo "host screen locked: $([ "$lock" = 1 ] && echo yes || echo no)"
   if ! exists; then echo "vm: $VM_NAME not created"; return; fi
+  echo "provisioned: $(tr '\n' ' ' < "$state" 2>/dev/null)"
   if ! running; then echo "vm: $VM_NAME stopped"; return; fi
-  echo "vm: $VM_NAME running at $(ip)"
+  echo "vm: $VM_NAME running at $(ip || echo '(no IP yet)')"
   g "/bin/sh -s" <<'EOF'
 echo "guest: macOS $(sw_vers -productVersion), console user $(stat -f %Su /dev/console)"
 echo "autologin: $(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null || echo none)"
 echo "screensaver idleTime: $(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo unset)"
-echo "askForPassword: $(defaults read com.apple.screensaver askForPassword 2>/dev/null || echo unset)"
 echo "screenLock: $(sysadminctl -screenLock status 2>&1 | sed 's/.*] //')"
 pmset -g | awk '$1 ~ /^(sleep|displaysleep|disksleep)$/ {printf "pmset %s: %s\n", $1, $2}'
 echo "guest locked: $(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')"
 a=$(cat ~/Applications/.agent-vm-app 2>/dev/null); if [ -z "$a" ]; then echo "app: none installed"; elif pgrep -f "^$a/Contents/MacOS/" >/dev/null; then echo "app: $(basename "$a") running ($(cat ~/Applications/.agent-vm-build 2>/dev/null))"; else echo "app: $(basename "$a") not running"; fi
+if pgrep -x voxl >/dev/null; then echo "voxl: running ($(cat ~/vm/voxl.mode 2>/dev/null))"; else echo "voxl: not running"; fi
 EOF
 }
 
@@ -242,7 +320,6 @@ cmd_record() {
       nohup caffeinate -i -t $((secs + 30)) >/dev/null 2>&1 & echo $! > "$VM_HOME/run/caffeinate.pid"; disown
       g "rm -f ~/vm/rec/current.mov ~/vm/rec/current.ticks.json; nohup ~/vm/bin/rec ~/vm/rec/current.mov $secs ${REC_SIZE:-} \
          >~/vm/rec/rec.log 2>&1 </dev/null & echo \$! > ~/vm/rec/pid"
-      [ "$(g "$allow_js")" = allowed ] && log "pressed Allow on the screen capture alert"
       local i; for i in $(seq 20); do
         g "grep -q '^recording' ~/vm/rec/rec.log" && break
         g "kill -0 \$(cat ~/vm/rec/pid) 2>/dev/null" || die "rec exited: $(g 'cat ~/vm/rec/rec.log')"
@@ -275,9 +352,98 @@ cmd_shot() {
   echo "$dir/$name.png"
 }
 
+# voxl streams the guest desktop to a browser. Its binary links x264 (GPL), so
+# agent-vm never ships one: the first vm view builds the pinned version in the
+# guest. voxl listens on the guest's loopback only; the host reaches it through
+# an ssh forward, and --remote also serves it on the host's tailnet name.
+cmd_view() {
+  local control=0 remote=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --control) control=1 ;;
+      --remote) remote=1 ;;
+      stop) view_stop; return ;;
+      *) die "usage: vm view [--control] [--remote] | vm view stop" ;;
+    esac
+    shift
+  done
+  running || die "$VM_NAME is not running; vm up first"
+  if [ "$(g "voxl --version 2>/dev/null | awk '{print \$NF}'")" != "$VOXL_VERSION" ]; then
+    log "building voxl $VOXL_VERSION in the guest (about 10 min the first time; log ~/vm/voxl-build.log)"
+    g "VOXL_VERSION=$VOXL_VERSION /bin/bash -s" < "$here/guest/voxl-build.sh" ||
+      die "voxl build failed; see ~/vm/voxl-build.log in the guest"
+  fi
+  local tok=$bundle/voxl-token
+  [ -s "$tok" ] || { (umask 077; openssl rand -hex 16 > "$tok"); }
+  local hosts="" ts=""
+  if [ "$remote" = 1 ]; then
+    command -v tailscale >/dev/null || die "--remote needs tailscale on the host"
+    ts=$(tailscale status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+    hosts="--allowed-hosts=$ts"
+  fi
+  local mode; mode=$([ "$control" = 1 ] && echo control || echo watch)
+  # Restart in the asked mode. Started over ssh, its screen capture counts
+  # against sshd-keygen-wrapper, which provision tcc granted.
+  g "umask 077; cat > ~/vm/voxl-token" < "$tok"
+  g "pkill -x voxl; for i in 1 2 3 4 5; do pgrep -x voxl >/dev/null || break; sleep 1; done
+     echo $mode${ts:+ remote} > ~/vm/voxl.mode
+     VOXL_PASSWORD=\$(cat ~/vm/voxl-token) nohup voxl --port=6901 $([ "$control" = 1 ] || echo --read-only) \
+       --files-root=\$HOME/Downloads $hosts >~/vm/voxl.log 2>&1 </dev/null &
+     for i in \$(seq 20); do curl -fs -o /dev/null localhost:6901/healthz && exit 0; sleep 0.5; done
+     tail -5 ~/vm/voxl.log; exit 1" || die "voxl did not start"
+  view_forward
+  local url="http://localhost:$VIEW_PORT/?token=$(cat "$tok")"
+  if [ "$remote" = 1 ]; then
+    tailscale serve --bg --https="$VIEW_PORT" "http://127.0.0.1:$VIEW_PORT" >/dev/null
+    : > "$VM_HOME/run/$VM_NAME.view-remote"
+    url="https://$ts:$VIEW_PORT/?token=$(cat "$tok")"
+  fi
+  log "voxl ($mode${ts:+, on the tailnet}): $url"
+  echo "$url"
+}
+
+# The ssh forward as a launchd job, so it outlives the caller like the guest.
+view_forward() {
+  local plist=$VM_HOME/run/$VIEW_JOB.plist o
+  {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$VIEW_JOB</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/ssh</string><string>-N</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+EOF
+    for o in "${sshopts[@]}"; do printf '    <string>%s</string>\n' "$o"; done
+    cat <<EOF
+    <string>-L</string><string>127.0.0.1:$VIEW_PORT:127.0.0.1:6901</string>
+    <string>$GUEST_USER@$(ip)</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>StandardErrorPath</key><string>$VM_HOME/logs/$VM_NAME-view.log</string>
+</dict></plist>
+EOF
+  } > "$plist"
+  job_reload "$VIEW_JOB" "$plist"
+  local i; for i in $(seq 20); do curl -fs -o /dev/null "http://127.0.0.1:$VIEW_PORT/healthz" && return; sleep 0.5; done
+  die "no forward on localhost:$VIEW_PORT (see $VM_HOME/logs/$VM_NAME-view.log)"
+}
+
+view_stop() {
+  if [ -f "$VM_HOME/run/$VM_NAME.view-remote" ]; then
+    tailscale serve --https="$VIEW_PORT" off >/dev/null 2>&1 || true
+    rm -f "$VM_HOME/run/$VM_NAME.view-remote"
+  fi
+  launchctl bootout "gui/$(id -u)/$VIEW_JOB" 2>/dev/null || true
+  if running; then g "pkill -x voxl; rm -f ~/vm/voxl.mode" || true; fi
+  log "view stopped"
+}
+
 c=${1:-}; shift || true
 case $c in
-  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync) "cmd_$c" "$@" ;;
+  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view) "cmd_$c" "$@" ;;
   forward-host) cmd_forward_host "$@" ;;
-  *) sed -n 2,22p "$0"; exit 2 ;;
+  *) sed -n 2,24p "$0"; exit 2 ;;
 esac
