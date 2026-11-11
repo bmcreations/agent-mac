@@ -25,21 +25,24 @@ The label is yours: put the commit and build time in it, so a report can say whi
 
 ## 3. Drive it
 
-`agent-vm ad` runs [agent-desktop](https://formulae.brew.sh/formula/agent-desktop) in the guest:
+`agent-vm ad` hands its arguments to [agent-desktop](https://formulae.brew.sh/formula/agent-desktop) inside the guest. agent-vm doesn't interpret them, so everything agent-desktop can do works here:
 
 ```sh
-agent-vm ad snapshot --app App -i
-agent-vm ad click @e12
-agent-vm ad snapshot --app App -i
+agent-vm ad find --app App --name Open --first   # returns a ref_id
+agent-vm ad click <ref_id>
 ```
 
-Take a fresh snapshot after every action that changes the screen; refs from an old snapshot can point at the wrong element.
+For the rest (typing, waiting, menus, when refs go stale), read agent-desktop's own guide, which matches the installed version:
+
+```sh
+agent-vm ad skills get desktop
+```
 
 ## 4. Record it
 
 ```sh
 agent-vm record start 30
-agent-vm ad click @e12
+agent-vm ad click <ref>
 agent-vm record stop ./recordings open-panel
 ```
 

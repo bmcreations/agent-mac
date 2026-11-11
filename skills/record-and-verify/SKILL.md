@@ -13,7 +13,7 @@ by hand. Judge motion from a recording of every frame.
 
 ```sh
 ./vm record start 30                 # max seconds; holds the host awake
-./vm ad click @e12                   # trigger the motion
+./vm ad click <ref>                  # trigger the motion
 ./vm record stop <dir> take-1        # take-1.mov, .ticks.json, .fps.json
 ```
 

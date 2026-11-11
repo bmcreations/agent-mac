@@ -37,16 +37,16 @@ guest, and `vm down` the ones you're done with.
 ```sh
 ./vm install path/to/App.app "<commit> built <time>"   # always label the build
 ./vm run [--env K=V]... [-- args...]                    # waits for the first window
-./vm ad snapshot --app App -i                           # tree with @refs
-./vm ad click @e12
-./vm ad type @e4 "text"
+./vm ad find --app App --name Open --first              # agent-desktop: returns a ref_id
+./vm ad click <ref_id>
 ./vm shot <dir> [name]                                  # one PNG
 ./vm quit
 ```
 
-- Take a fresh `snapshot` before each action. Refs and coordinates from an
-  earlier run, or from before the layout changed, miss.
-- `vm ad` is agent-desktop in the guest; `./vm ad --help` lists its commands.
+- `vm ad` passes everything to agent-desktop in the guest. For clicking,
+  typing, waiting and stale refs, follow agent-desktop's guide:
+  `./vm ad skills get desktop`. Don't reuse refs or coordinates from an
+  earlier run.
 - Report which build is in the guest (the label you gave `vm install`).
 - Keep screenshots and recordings in a gitignored directory of the project
   you're working on, never `/tmp`: a reboot wipes it.

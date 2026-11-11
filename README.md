@@ -25,17 +25,18 @@ The first `agent-vm up` downloads the newest restore image Apple offers (about 2
 ```sh
 agent-vm install path/to/App.app "abc1234"   # copy a build in, with a label
 agent-vm run                                 # launch it and wait for its window
-agent-vm ad snapshot --app App -i            # agent-desktop in the guest: elements with refs
-agent-vm ad click @e12                       # act on a ref
-agent-vm ad snapshot --app App -i            # observe again to verify
+agent-vm ad find --app App --name Open --first   # agent-desktop in the guest
+agent-vm ad click <ref_id from find>
 agent-vm down
 ```
+
+Clicking, typing and reading the screen are [agent-desktop](https://agent-browser.dev/desktop)'s job: `agent-vm ad` passes its arguments straight to it inside the guest. `agent-vm ad skills get desktop` prints its guide for the installed version.
 
 To check motion rather than a still state, record around the action:
 
 ```sh
 agent-vm record start 30
-agent-vm ad click @e12
+agent-vm ad click <ref>
 agent-vm record stop ./recordings open-panel   # open-panel.mov, .ticks.json, .fps.json
 ```
 
