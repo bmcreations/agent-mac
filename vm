@@ -22,7 +22,9 @@
 #   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
 #   vm shot <dir> [name]       one guest screenshot into <dir>
 #   vm vsync [secs]            guest display refreshes per second (compositing check)
-#   vm view [--control] [--remote]  open the guest desktop in a browser (voxl)
+#   vm view [--control] [--remote]  open the guest desktop in a browser (voxl);
+#                              --control holds the guest for the person: vm ad input,
+#                              run, quit and install exit 3 until vm view or vm view stop
 #   vm view stop               stop voxl and its forwards
 #
 # Installed with Homebrew the command is agent-vm.
@@ -344,6 +346,7 @@ cmd_status() {
   echo "provisioned: $(tr '\n' ' ' < "$state" 2>/dev/null)"
   if ! running; then echo "vm: $VM_NAME stopped"; return; fi
   echo "vm: $VM_NAME running at $(ip || echo '(no IP yet)')"
+  if [ -f "$hold" ]; then echo "hold: a person has control since $(cat "$hold"); agent input refuses (exit $HELD)"; else echo "hold: none"; fi
   g "/bin/sh -s" <<'EOF'
 echo "guest: macOS $(sw_vers -productVersion), console user $(stat -f %Su /dev/console)"
 echo "autologin: $(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null || echo none)"
@@ -362,6 +365,7 @@ cmd_ssh() { if [ $# = 0 ]; then ssh -t "${sshopts[@]}" "$GUEST_USER@$(ip)"; else
 app() { g "cat ~/Applications/.agent-vm-app 2>/dev/null" || true; }
 
 cmd_install() {
+  refuse_if_held install
   local src=${1:?usage: vm install <App.app> [build label]} label=${2:-} name
   [ -d "$src/Contents/MacOS" ] || die "$src is not an app bundle"
   name=$(basename "$src")
@@ -376,6 +380,7 @@ cmd_install() {
 }
 
 cmd_run() {
+  refuse_if_held run
   local a envs=() args=() name
   a=$(app); [ -n "$a" ] || die "nothing installed; run vm install first"
   while [ $# -gt 0 ]; do
@@ -396,6 +401,7 @@ cmd_run() {
 }
 
 cmd_quit() {
+  refuse_if_held quit
   # Match the installed copy by path: another session's build of the same app
   # under another path keeps running.
   local a exe; a=$(app); [ -n "$a" ] || return 0
@@ -416,7 +422,29 @@ echo "$name -> \$gw"
 EOF
 }
 
-cmd_ad() { g "agent-desktop $(q "$@")"; }
+# While a person drives the guest in voxl (vm view --control), agents give
+# way: input refuses with exit 3 until they hand back with vm view or vm view
+# stop. Reading the screen still works.
+hold=$VM_HOME/run/$VM_NAME.hold
+HELD=3
+refuse_if_held() {
+  [ -f "$hold" ] || return 0
+  echo "vm: a person has control of $VM_NAME (vm view --control since $(cat "$hold")); $1 waits until they hand back with vm view or vm view stop" >&2
+  exit $HELD
+}
+
+# agent-desktop verbs that only read; every other verb counts as input.
+AD_VERBS=" snapshot find screenshot get is click double-click triple-click right-click type set-value clear focus select toggle check uncheck expand collapse scroll scroll-to press key-down key-up hover drag mouse-move mouse-click mouse-down mouse-up mouse-wheel launch close-app list-windows list-displays list-apps focus-window resize-window move-window minimize maximize restore list-surfaces open-system-surface list-notifications dismiss-notification dismiss-all-notifications notification-action clipboard-get clipboard-set clipboard-clear wait status permissions version batch skills session cursor-overlay trace help "
+AD_READ=" snapshot find screenshot get is list-windows list-displays list-apps list-surfaces list-notifications clipboard-get wait status permissions version skills session trace help "
+
+cmd_ad() {
+  # The verb is the first argument agent-desktop knows as one; flags before
+  # it can take values (--session s1). An unknown verb counts as input.
+  local a verb=""
+  for a in "$@"; do case $AD_VERBS in *" $a "*) verb=$a; break ;; esac; done
+  case $AD_READ in *" ${verb:-?} "*) ;; *) refuse_if_held "agent-desktop ${verb:-input}" ;; esac
+  g "agent-desktop $(q "$@")"
+}
 
 cmd_record() {
   case ${1:-} in
@@ -509,6 +537,7 @@ cmd_view() {
     : > "$VM_HOME/run/$VM_NAME.view-remote"
     url="https://$ts:$VIEW_PORT/?token=$(cat "$tok")"
   fi
+  if [ "$control" = 1 ]; then date '+%H:%M:%S' > "$hold"; else rm -f "$hold"; fi
   log "voxl ($mode${ts:+, on the tailnet}): $url"
   echo "$url"
 }
@@ -548,6 +577,7 @@ view_stop() {
     rm -f "$VM_HOME/run/$VM_NAME.view-remote"
   fi
   launchctl bootout "gui/$(id -u)/$VIEW_JOB" 2>/dev/null || true
+  rm -f "$hold"
   if running; then g "pkill -x voxl; rm -f ~/vm/voxl.mode" || true; fi
   log "view stopped"
 }
