@@ -6,6 +6,25 @@ The first `vm up` also builds `ready`: a provisioned guest with the Command Line
 
 After updating agent-vm, run `vm prepare --rebuild` so new guests get the new provisioning. `VM_BREW=0` skips the prepared guest and starts from the bare install.
 
+## A fixed environment
+
+```sh
+vm up --display 1440x900 --appearance dark --locale de_DE
+```
+
+The flags are kept in the guest's `config.json` and applied on every later `vm up`, so runs compare. `--display` is in points: the virtual display is twice that in pixels and the guest uses the matching HiDPI mode, so recordings and agent-desktop coordinates are 1440x900. Without it the guest picks a scaled mode of its own. The locale applies to apps started afterwards; `vm run` starts the app fresh.
+
+## Saving and restoring
+
+```sh
+vm save before-login     # memory and disks; the guest stops
+vm restore before-login  # back where it was
+```
+
+A snapshot is the guest's saved memory and device state, with APFS clones of its disks as they were. Restoring puts those disks back, so the same snapshot can be restored again and again, as a known starting point for each run. Snapshots live in the guest bundle and `vm status` lists them.
+
+Saving needs the host screen unlocked: Virtualization.framework encrypts the state with a Secure Enclave key, which can't be created while it is locked. A failed restore boots the guest cold on its own disks.
+
 ## Several guests
 
 `VM_NAME` picks the guest, so `VM_NAME=review vm up` gives a second one. macOS runs at most two macOS guests at once, and the prepared guest counts while it is being built.

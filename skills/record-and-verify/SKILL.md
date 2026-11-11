@@ -14,7 +14,7 @@ by hand. Judge motion from a recording of every frame.
 ```sh
 ./vm record start 30                 # max seconds; holds the host awake
 ./vm ad click <ref>                  # trigger the motion
-./vm record stop <dir> take-1        # take-1.mov, .ticks.json, .fps.json
+./vm record stop <dir> take-1        # take-1.mov, .ticks.json, .fps.json, .actions.json
 ```
 
 Read `take-1.fps.json` before looking at the video:
@@ -28,6 +28,12 @@ Read `take-1.fps.json` before looking at the video:
 
 `ticks.json` marks each 60 Hz tick 1 (new frame) or 0 (repeat), so you can
 find the exact moment a stall starts.
+
+`actions.json` lines up each `vm ad` call with the movie: `start_s`, and
+`first_change_after_start_ms`, an interval for the first new frame after the
+call started. Trust it only when `fresh_ticks_in_second_before` is near 0;
+otherwise something else on screen (a caret, the clock) was changing. Guest
+milliseconds aren't real hardware's: compare guest runs with each other.
 
 ## Cover what the person will do
 

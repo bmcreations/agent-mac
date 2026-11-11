@@ -17,7 +17,7 @@ voxl listens only on the guest's loopback. `vm view` reaches it through an ssh f
 
 ## Watching and control
 
-`vm view` starts watch-only. With `--control`, a person and an agent can both send input to the same screen, and voxl doesn't report whether anyone is connected. An agent should stop sending input while a person has control.
+`vm view` starts watch-only. `--control` also puts a hold on the guest: until the person hands back with `vm view` (back to watching) or `vm view stop`, agent input through `vm ad`, and `vm run`, `vm quit`, `vm install`, `vm save` and `vm restore`, exit 3 with a message saying since when. Reading the screen (`snapshot`, `find`, `list-windows`, `screenshot` and other read-only verbs) still works, and `vm status` shows the hold. The hold has no timeout: the person ends it.
 
 The file panel is limited to the guest's `~/Downloads`.
 

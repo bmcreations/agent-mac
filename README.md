@@ -37,7 +37,17 @@ To check motion rather than a still state, record around the action:
 ```sh
 agent-vm record start 30
 agent-vm ad click <ref>
-agent-vm record stop ./recordings open-panel   # open-panel.mov, .ticks.json, .fps.json
+agent-vm record stop ./recordings open-panel   # .mov, .ticks.json, .fps.json, .actions.json
+```
+
+`open-panel.actions.json` lines each `agent-vm ad` call up with the frames, so you can see when the screen first changed after the click.
+
+For runs that compare, fix the guest's screen, look and language, and keep a snapshot to start from:
+
+```sh
+agent-vm up --display 1440x900 --appearance dark --locale de_DE
+agent-vm save logged-in        # memory and disks; the guest stops
+agent-vm restore logged-in     # back to that moment, as often as you like
 ```
 
 ## How it works
@@ -81,18 +91,18 @@ Or add this to your project's `AGENTS.md`:
 ```md
 Check Mac UI in an agent-vm guest, never on the host's own screen. Before the
 first use, read `$(brew --prefix agent-vm)/share/agent-vm/skills/agent-vm/SKILL.md`
-and follow it. If a person has control in `agent-vm view`, stop sending input.
+and follow it. Exit code 3 means a person has control in `agent-vm view`: wait.
 ```
 
 ## Commands
 
 | Group | Commands |
 |---|---|
-| Guest | `up`, `down`, `prepare`, `status`, `ssh` |
+| Guest | `up`, `down`, `save`, `restore`, `prepare`, `status`, `ssh` |
 | App | `install`, `run`, `quit` |
 | Drive | `ad` (agent-desktop in the guest) |
 | Capture | `record start`, `record stop`, `shot`, `vsync` |
-| People | `view`, `view --control`, `view --remote`, `view stop` |
+| People | `view`, `view --control` (agents give way), `view --remote`, `view stop` |
 | Network | `forward-host` |
 
 Every command, with its arguments and output: [docs/commands.md](docs/commands.md).

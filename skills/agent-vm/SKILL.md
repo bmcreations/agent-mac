@@ -29,6 +29,19 @@ Line Tools, Homebrew and voxl (about 10 minutes once); new guests copy it and
 are up in about 20 seconds. `brew install` works in the guest (`./vm ssh 'zsh -lc "brew …"'`).
 `VM_BREW=0` skips that. After updating agent-vm, `./vm prepare --rebuild`.
 
+For runs that must compare, fix the environment once; it sticks for later
+`vm up`:
+
+```sh
+./vm up --display 1440x900 --appearance dark --locale de_DE   # points, HiDPI
+```
+
+`./vm save <name>` keeps the running guest (memory and disks) and stops it;
+`./vm restore <name>` resumes it exactly there, as often as you like, so a
+snapshot taken after logging in or seeding data is a clean start for each
+run. Saving fails while the host screen is locked; say so rather than
+retrying.
+
 At most two macOS guests run at once. Use `VM_NAME=<name>` for a separate
 guest, and `vm down` the ones you're done with.
 
@@ -65,8 +78,11 @@ person that link. `--control` lets them use the mouse and keyboard;
 or another machine.
 
 - Start in watch mode unless the person asks to take control.
-- While a person has control, stop sending input: voxl can't tell you
-  whether they're still using it, so ask before you resume.
+- `--control` puts a hold on the guest. Input through `vm ad`, and `vm run`,
+  `quit`, `install`, `save` and `restore`, exit 3 until the person hands
+  back with `./vm view` or `./vm view stop`. Exit 3 means wait, not fail:
+  tell the person you're waiting, and don't end the hold yourself. Reading
+  the screen (`snapshot`, `find`, `screenshot`) still works.
 - The first `vm view` on a guest builds voxl (about 10 minutes). Say so
   before you start it.
 - `./vm view stop` when they're done.
