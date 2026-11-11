@@ -11,7 +11,7 @@ Installed with Homebrew the command is `agent-mac`; from a checkout it is `./vm`
 | `up --appearance dark\|light` | Fix the guest's appearance. |
 | `up --locale ll_CC` | Fix the guest's language and region, e.g. `de_DE`, for apps started afterwards. |
 | `save [name]` | Save the running guest's memory and disks as snapshot `name` (default `default`) and stop it. Needs the host screen unlocked. |
-| `restore [name]` | Resume a snapshot where it was saved. Boots the guest cold on its own disks if the snapshot can't be restored. |
+| `restore [name]` | Resume a snapshot where it was saved. Needs the host screen unlocked. Boots the guest cold on its own disks if the snapshot can't be restored. |
 | `down` | Shut the guest down over ssh and wait for it to stop. |
 | `prepare [--rebuild]` | Build the prepared guest that new guests copy. `--rebuild` after updating agent-mac. |
 | `status` | Guest state and IP, snapshots, any hold, host lock state, the guest's lock, sleep and autologin settings, the installed app, and voxl. |

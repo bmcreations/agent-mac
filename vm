@@ -603,6 +603,8 @@ cmd_restore() {
   snap=$snaps/$name
   [ -s "$snap/state.vzvmsave" ] || die "no snapshot $name of $VM_NAME; saved: $(ls "$snaps" 2>/dev/null | tr '\n' ' ')"
   refuse_if_held restore
+  # Reading the state needs the same Secure Enclave key as saving it.
+  host_locked && die "the host screen is locked; restoring needs it unlocked${VM_NAME:+ ($VM_NAME is left as it is)}"
   view_stop >/dev/null 2>&1 || true
   # Stop hard: the disks are replaced anyway, and a clean shutdown costs seconds.
   if running; then
