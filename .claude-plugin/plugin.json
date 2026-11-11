@@ -1,7 +1,7 @@
 {
   "name": "agent-mac",
   "description": "Run, drive and record a Mac app in a headless macOS guest, and let people watch or take over in a browser.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": { "name": "Brandon McAnsh", "url": "https://github.com/bmcreations" },
   "repository": "https://github.com/bmcreations/agent-mac",
   "license": "MIT"
