@@ -567,7 +567,7 @@ cmd_save() {
     sleep 0.5
   done
   if kill -0 "$pid" 2>/dev/null; then
-    local why; why=$(tail -c +$((off + 1)) "$log" | grep 'could not' | tail -1)
+    local why; why=$(tail -c +$((off + 1)) "$log" | grep 'could not' | tail -1 || true)
     die "not saved, $VM_NAME is still running: ${why:-no reply from the runner}"
   fi
   [ -s "$bundle/state.vzvmsave" ] || die "the runner exited without a saved state; see $log"
@@ -594,14 +594,24 @@ cmd_restore() {
   launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
   # Keep the current disks, to fall back to a cold boot on them.
   local f; for f in disk.img aux.img config.json; do cp -c "$bundle/$f" "$bundle/$f.pre-restore"; cp -c "$snap/$f" "$bundle/$f"; done
-  off=$(wc -c < "$log" 2>/dev/null || echo 0)
-  boot --restore "$snap/state.vzvmsave"
-  local i ok=0; for i in $(seq 120); do
-    tail -c +$((off + 1)) "$log" 2>/dev/null | grep -q 'restored ' && { ok=1; break; }
-    tail -c +$((off + 1)) "$log" 2>/dev/null | grep -q 'could not' && break
-    # launchd may not have spawned the runner yet; only its absence later counts.
-    [ "$i" -gt 6 ] && ! running && break
-    sleep 0.5
+  local i ok=0 try hung
+  for try in 1 2; do
+    off=$(wc -c < "$log" 2>/dev/null || echo 0)
+    boot --restore "$snap/state.vzvmsave"
+    hung=1
+    for i in $(seq 120); do
+      tail -c +$((off + 1)) "$log" 2>/dev/null | grep -q 'restored ' && { ok=1; break; }
+      tail -c +$((off + 1)) "$log" 2>/dev/null | grep -q 'could not' && { hung=0; break; }
+      # launchd may not have spawned the runner yet; only its absence later counts.
+      [ "$i" -gt 6 ] && ! running && { hung=0; break; }
+      sleep 0.5
+    done
+    # A restore has hung once without an error and worked on the next try;
+    # a refused one fails the same way again.
+    [ "$ok" = 1 ] || [ "$hung" = 0 ] || [ "$try" = 2 ] && break
+    log "no reply from the runner in 60 s; trying the restore once more"
+    launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true; pkill -KILL -f "$runner_pat" || true
+    for f in disk.img aux.img config.json; do cp -c "$snap/$f" "$bundle/$f"; done
   done
   if [ "$ok" = 1 ]; then
     for f in disk.img aux.img config.json; do rm -f "$bundle/$f.pre-restore"; done
@@ -611,7 +621,8 @@ cmd_restore() {
     log "restored $name ($(tail -c +$((off + 1)) "$log" | sed -n 's/.*restored [^ ]* in \([0-9.]* s\).*/\1/p' | tail -1)), up at $(ip)"
     return
   fi
-  local why; why=$(tail -c +$((off + 1)) "$log" 2>/dev/null | grep 'could not' | tail -1)
+  local why; why=$(tail -c +$((off + 1)) "$log" 2>/dev/null | grep 'could not' | tail -1 || true)
+  [ "$hung" = 1 ] && why="no reply from the runner in 60 s"
   launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
   for f in disk.img aux.img config.json; do mv "$bundle/$f.pre-restore" "$bundle/$f"; done
   log "could not restore $name (${why:-runner exited}); booting $VM_NAME cold instead"
