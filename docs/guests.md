@@ -23,7 +23,9 @@ vm restore before-login  # back where it was
 
 A snapshot is the guest's saved memory and device state, with APFS clones of its disks as they were. Restoring puts those disks back, so the same snapshot can be restored again and again, as a known starting point for each run. Snapshots live in the guest bundle and `vm status` lists them.
 
-Saving needs the host screen unlocked: Virtualization.framework encrypts the state with a Secure Enclave key, which can't be created while it is locked. A failed restore boots the guest cold on its own disks.
+Saving needs the host screen unlocked: Virtualization.framework encrypts the state with a Secure Enclave key, which can't be created while it is locked. A failed restore boots the guest cold on its own disks, and a restore that hangs is tried once more first. `vm restore` sets the guest's clock from the host, since the guest wakes at the time it was saved.
+
+On a guest with 8 GB of memory, saves took 8–28 s and the state file was 2.3–3.1 GB; restores took 4.5–15 s. The state is encrypted, so it doesn't compress, and `purge` in the guest before saving didn't shrink it. It grows with the memory the guest has used, so a guest made with a smaller `VM_MEMORY_MB` saves smaller. The disk clones only take space as the guest's disks change after the save.
 
 ## Several guests
 
