@@ -1,0 +1,8 @@
+{
+  "name": "agent-vm",
+  "description": "Run, drive and record a Mac app in a headless macOS guest, and let people watch or take over in a browser.",
+  "version": "0.1.0",
+  "author": { "name": "Brandon McAnsh", "url": "https://github.com/bmcreations" },
+  "repository": "https://github.com/bmcreations/agent-vm",
+  "license": "MIT"
+}
