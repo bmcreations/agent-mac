@@ -43,6 +43,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     var adaptor: AVAssetWriterInputPixelBufferAdaptor!
     var timer: DispatchSourceTimer?
     var t0: CFTimeInterval = 0
+    var startEpoch = 0.0    // wall clock at tick 0, to line up vm ad's action log
     var ticks = ""          // one char per tick: 1 fresh, 0 held, d dropped
     var appended = 0, dropped = 0, freshCount = 0
     var stopping = false
@@ -128,6 +129,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             guard writer.startWriting() else { fail("startWriting: \(String(describing: writer.error))") }
             writer.startSession(atSourceTime: .zero)
             t0 = CACurrentMediaTime()
+            startEpoch = Date().timeIntervalSince1970
             print("recording \(width)x\(height) at \(Int(hz)) fps")
         }
         let pts = CMTime(seconds: CACurrentMediaTime() - t0, preferredTimescale: 60000)
@@ -156,7 +158,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 "file": out.path, "width": width, "height": height, "hz": hz,
                 "seconds": (elapsed * 1000).rounded() / 1000,
                 "appended": appended, "fresh": freshCount, "dropped": dropped,
-                "ticks": ticks,
+                "ticks": ticks, "start_epoch": (startEpoch * 1000).rounded() / 1000,
             ]
             let data = try! JSONSerialization.data(withJSONObject: side, options: [.sortedKeys])
             try! data.write(to: out.deletingPathExtension().appendingPathExtension("ticks.json"))

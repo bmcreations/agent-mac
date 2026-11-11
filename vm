@@ -19,7 +19,8 @@
 #   vm forward-host <name>     resolve <name> to the host in the guest's /etc/hosts
 #   vm ad <args...>            agent-desktop in the guest
 #   vm record start [secs]     record the guest screen (default 60 s max)
-#   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps
+#   vm record stop <dir> [name]  stop and pull the .mov into <dir>, with fps, and the
+#                              vm ad calls made meanwhile lined up with its frames
 #   vm shot <dir> [name]       one guest screenshot into <dir>
 #   vm vsync [secs]            guest display refreshes per second (compositing check)
 #   vm view [--control] [--remote]  open the guest desktop in a browser (voxl);
@@ -295,9 +296,10 @@ EOF
   mkdir -p "$VM_HOME/bin"
   local t bin
   for t in vsync rec display; do
-    # A release ships them built; a checkout compiles them once.
+    # A release ships them built; a checkout compiles them from its source,
+    # so a guest-bin left by make dist can't shadow an edit.
     bin=$here/guest-bin/$t
-    if [ ! -x "$bin" ]; then
+    if [ -d "$here/.git" ] || [ ! -x "$bin" ]; then
       bin=$VM_HOME/bin/$t
       [ "$bin" -nt "$here/guest/$t.swift" ] ||
         xcrun swiftc -O -target arm64-apple-macos14 -o "$bin" "$here/guest/$t.swift"
@@ -443,7 +445,16 @@ cmd_ad() {
   local a verb=""
   for a in "$@"; do case $AD_VERBS in *" $a "*) verb=$a; break ;; esac; done
   case $AD_READ in *" ${verb:-?} "*) ;; *) refuse_if_held "agent-desktop ${verb:-input}" ;; esac
-  g "agent-desktop $(q "$@")"
+  # During a recording, stamp the call's start and end on the guest clock, so
+  # vm record stop can line it up with the frames.
+  local args; args=$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
+  g "if kill -0 \$(cat ~/vm/rec/pid 2>/dev/null) 2>/dev/null; then
+       now() { perl -MTime::HiRes=time -e 'printf \"%.3f\", time'; }
+       s=\$(now); agent-desktop $(q "$@"); rc=\$?; e=\$(now)
+       printf '{\"start\":%s,\"end\":%s,\"rc\":%d,\"args\":%s}\\n' \$s \$e \$rc $(q "$args") >> ~/vm/rec/current.actions.jsonl
+       exit \$rc
+     fi
+     agent-desktop $(q "$@")"
 }
 
 cmd_record() {
@@ -452,7 +463,7 @@ cmd_record() {
       local secs=${2:-60}
       # The guest pauses whenever the host sleeps; hold the host awake.
       nohup caffeinate -i -t $((secs + 30)) >/dev/null 2>&1 & echo $! > "$VM_HOME/run/caffeinate.pid"; disown
-      g "rm -f ~/vm/rec/current.mov ~/vm/rec/current.ticks.json; nohup ~/vm/bin/rec ~/vm/rec/current.mov $secs ${REC_SIZE:-} \
+      g "rm -f ~/vm/rec/current.mov ~/vm/rec/current.ticks.json ~/vm/rec/current.actions.jsonl; nohup ~/vm/bin/rec ~/vm/rec/current.mov $secs ${REC_SIZE:-} \
          >~/vm/rec/rec.log 2>&1 </dev/null & echo \$! > ~/vm/rec/pid"
       local i; for i in $(seq 20); do
         g "grep -q '^recording' ~/vm/rec/rec.log" && break
@@ -471,10 +482,44 @@ cmd_record() {
       g "cat ~/vm/rec/current.mov" > "$dir/$name.mov"
       g "cat ~/vm/rec/current.ticks.json" > "$dir/$name.ticks.json"
       kill "$(cat "$VM_HOME/run/caffeinate.pid" 2>/dev/null)" 2>/dev/null || true
+      if g "test -s ~/vm/rec/current.actions.jsonl"; then
+        g "cat ~/vm/rec/current.actions.jsonl" | actions_line_up "$dir/$name.ticks.json" > "$dir/$name.actions.json"
+        log "actions: $dir/$name.actions.json"
+      fi
       "$here/fps" "$dir/$name.mov" | tee "$dir/$name.fps.json"
       ;;
     *) die "usage: vm record start [secs] | stop <dir> [name]" ;;
   esac
+}
+
+# The vm ad calls made during a recording (JSON lines on stdin), lined up with
+# its ticks: when each started and ended in the movie, and the first tick
+# after its start that got a new frame from the display. The change happened
+# between that tick and the one before, so it is reported as an interval.
+# Any change on screen counts, so it is this action's only on a still screen.
+actions_line_up() {
+  python3 -I -c '
+import json, sys
+t = json.load(open(sys.argv[1])); hz, ticks, t0 = t["hz"], t["ticks"], t["start_epoch"]
+out = []
+for line in sys.stdin:
+    a = json.loads(line)
+    start, end = a["start"] - t0, a["end"] - t0
+    r = {"args": a["args"], "rc": a["rc"], "start_s": round(start, 3), "end_s": round(end, 3)}
+    first = next((i for i in range(max(0, int(start * hz) + 1), len(ticks)) if ticks[i] == "1"), None)
+    if first is not None:
+        r["first_change_s"] = [round((first - 1) / hz, 3), round(first / hz, 3)]
+        r["first_change_after_start_ms"] = [max(0, round(((first - 1) / hz - start) * 1000)), round((first / hz - start) * 1000)]
+    else:
+        r["first_change_s"] = None
+    # Any change counts, a blinking caret or the menu bar clock too: how busy
+    # the screen was over the second before says whether the first change
+    # above is likely caused by this action.
+    k = int(start * hz)
+    r["fresh_ticks_in_second_before"] = ticks[max(0, k - int(hz)):max(0, k)].count("1")
+    out.append(r)
+json.dump({"start_epoch": t0, "hz": hz, "actions": out}, sys.stdout, indent=1)
+print()' "$1"
 }
 
 cmd_vsync() { g "~/vm/bin/vsync ${1:-10}"; }
