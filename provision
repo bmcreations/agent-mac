@@ -1,0 +1,140 @@
+#!/bin/bash
+# Provision a stopped guest by writing to its disk from the host, so nobody has
+# to click through Setup Assistant.
+#
+#   provision base <bundle> <ssh-pubkey>   skip Setup Assistant; first boot creates
+#                                         the admin user, autologin, ssh, sudo
+#   provision tcc <bundle>                 grant Accessibility, Screen Recording,
+#                                         Post Event and Apple Events to commands
+#                                         run over ssh (after the first boot)
+#   provision check <bundle>               print what is on the Data volume
+#
+# The guest must be stopped. GUEST_USER and GUEST_PASS default to admin/admin.
+set -euo pipefail
+
+GUEST_USER=${GUEST_USER:-admin}
+GUEST_PASS=${GUEST_PASS:-admin}
+die() { echo "provision: $*" >&2; exit 1; }
+log() { echo "provision: $*" >&2; }
+
+disks=() mnt=
+cleanup() {
+  [ -n "$mnt" ] && diskutil unmount "$mnt" >/dev/null 2>&1 || true
+  local d; for d in "${disks[@]+"${disks[@]}"}"; do diskutil eject "$d" >/dev/null 2>&1 || true; done
+}
+trap cleanup EXIT
+
+# Attach <bundle>/disk.img and mount its Data volume read-write with owners on.
+# Writing root-owned files (the first-boot LaunchDaemon) needs sudo on the host.
+mount_data() {
+  local img=$1/disk.img out vol
+  [ -f "$img" ] || die "no disk.img in $1"
+  pgrep -f "agent-vm-runner run $1" >/dev/null && die "the guest is running; stop it first"
+  out=$(diskutil image attach --noMount "$img")
+  disks=($(echo "$out" | awk '$1 ~ /^\/dev\/disk[0-9]+$/ {print $1}' | sort -u))
+  vol=$(diskutil apfs list -plist | python3 -c '
+import plistlib, sys
+for c in plistlib.loads(sys.stdin.buffer.read())["Containers"]:
+    for v in c["Volumes"]:
+        if "Data" in v.get("Roles", []) and v.get("Name") == "Data" and c["PhysicalStores"][0]["DeviceIdentifier"].rstrip("0123456789").rstrip("s") in sys.argv[1:]:
+            print(v["DeviceIdentifier"])' $(for d in "${disks[@]}"; do basename "$d"; done) | tail -1)
+  [ -n "$vol" ] || die "no Data volume found in $img"
+  mnt=$(mktemp -d "${TMPDIR:-/tmp}/agent-vm-data.XXXX")
+  diskutil mount -mountPoint "$mnt" "$vol" >/dev/null
+  sudo diskutil enableOwnership "$mnt" >/dev/null
+  DATA=$mnt
+}
+
+cmd_base() {
+  local bundle=${1:?usage: provision base <bundle> <ssh-pubkey>} pub=${2:?ssh public key file}
+  [ -f "$pub" ] || die "no public key at $pub"
+  mount_data "$bundle"; local d=$DATA
+  sudo mkdir -p "$d/private/var/db" "$d/Library/LaunchDaemons" "$d/Library/agent-vm"
+  sudo touch "$d/private/var/db/.AppleSetupDone"
+  # sysadminctl -autologin records the user but never writes kcpassword on
+  # 27.2, and the guest has no python, so encode it here (XOR, 12-byte pad).
+  python3 -I -c '
+import sys
+k=[0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F]
+p=bytearray(sys.argv[1].encode()); p+=bytes(12-len(p)%12)
+sys.stdout.buffer.write(bytes(c^k[i%11] for i,c in enumerate(p)))' "$GUEST_PASS" | sudo tee "$d/private/etc/kcpassword" >/dev/null
+  sudo chown 0:0 "$d/private/etc/kcpassword"; sudo chmod 600 "$d/private/etc/kcpassword"
+  sudo cp "$pub" "$d/Library/agent-vm/authorized_keys"
+  sudo tee "$d/Library/agent-vm/firstboot.sh" >/dev/null <<EOF
+#!/bin/bash
+# Runs once as root at the guest's first boot, then removes itself.
+exec >>/var/log/agent-vm-firstboot.log 2>&1
+set -x
+u=$GUEST_USER p=$GUEST_PASS
+if ! id "\$u" >/dev/null 2>&1; then
+  sysadminctl -addUser "\$u" -fullName "\$u" -password "\$p" -admin
+fi
+sysadminctl -autologin set -userName "\$u" -password "\$p"
+echo "\$u ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/agent-vm; chmod 440 /etc/sudoers.d/agent-vm
+h=\$(dscl . -read /Users/\$u NFSHomeDirectory | awk '{print \$2}')
+mkdir -p "\$h/.ssh" && cp /Library/agent-vm/authorized_keys "\$h/.ssh/authorized_keys"
+chown -R "\$u:staff" "\$h/.ssh"; chmod 700 "\$h/.ssh"; chmod 600 "\$h/.ssh/authorized_keys"
+launchctl enable system/com.openssh.sshd
+launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist || launchctl kickstart -k system/com.openssh.sshd
+pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0
+# The per-user Setup Assistant screens shown at first login.
+sa="\$h/Library/Preferences/com.apple.SetupAssistant.plist"
+v=\$(sw_vers -productVersion) b=\$(sw_vers -buildVersion)
+for k in DidSeeCloudSetup DidSeeSiriSetup DidSeeScreenTime DidSeeActivationLock DidSeePrivacy \
+         DidSeeAppearanceSetup DidSeeAccessibility DidSeeTouchIDSetup DidSeeApplePaySetup \
+         DidSeeIntelligence DidSeeTermsOfAddress DidSeeLockdownMode DidSeeSyncSetup DidSeeSyncSetup2; do
+  defaults write "\$sa" "\$k" -bool true
+done
+defaults write "\$sa" LastSeenCloudProductVersion "\$v"; defaults write "\$sa" LastSeenBuddyBuildVersion "\$b"
+defaults write "\$sa" SkipFirstLoginOptimization -bool true
+chown "\$u:staff" "\$sa"
+defaults write /Library/Preferences/com.apple.SubmitDiagInfo AutoSubmit -bool false
+touch /Library/agent-vm/firstboot.done
+rm -f /Library/LaunchDaemons/dev.agent-vm.firstboot.plist
+EOF
+  sudo chmod 755 "$d/Library/agent-vm/firstboot.sh"
+  sudo tee "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist" >/dev/null <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.agent-vm.firstboot</string>
+  <key>ProgramArguments</key><array><string>/Library/agent-vm/firstboot.sh</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+  sudo chown -R 0:0 "$d/Library/agent-vm" "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist" "$d/private/var/db/.AppleSetupDone"
+  sudo chmod 644 "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist"
+  log "base written to $bundle; boot it once, then run: provision tcc $bundle"
+}
+
+# Commands run over ssh count against sshd-keygen-wrapper; osascript needs its
+# own rows to press the screen capture alert's Allow button.
+cmd_tcc() {
+  local bundle=${1:?usage: provision tcc <bundle>} d db
+  mount_data "$bundle"; d=$DATA
+  db="$d/Library/Application Support/com.apple.TCC/TCC.db"
+  sudo test -f "$db" || die "no system TCC.db yet; boot the guest once first"
+  local now; now=$(date +%s)
+  local sql="" c s
+  for c in /usr/libexec/sshd-keygen-wrapper /usr/bin/osascript; do
+    for s in kTCCServiceAccessibility kTCCServiceScreenCapture kTCCServicePostEvent; do
+      sql+="insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('$s','$c',1,2,4,1,'UNUSED',0,$now);"
+    done
+    sql+="insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,indirect_object_identifier,flags,last_modified) values ('kTCCServiceAppleEvents','$c',1,2,4,1,0,'com.apple.systemevents',0,$now);"
+  done
+  sudo sqlite3 "$db" "$sql"
+  sudo sqlite3 "$db" "select service, client, auth_value from access where client in ('/usr/libexec/sshd-keygen-wrapper','/usr/bin/osascript')"
+}
+
+cmd_check() {
+  mount_data "${1:?usage: provision check <bundle>}"; local d=$DATA
+  sudo ls -la "$d/private/var/db/.AppleSetupDone" "$d/Library/agent-vm" 2>&1 || true
+  sudo cat "$d/private/var/log/agent-vm-firstboot.log" 2>/dev/null | tail -20 || true
+  sudo sqlite3 "$d/Library/Application Support/com.apple.TCC/TCC.db" "select service, client, auth_value from access" 2>&1 || true
+}
+
+c=${1:-}; shift || true
+case $c in
+  base|tcc|check) "cmd_$c" "$@" ;;
+  *) sed -n 2,13p "$0"; exit 2 ;;
+esac
