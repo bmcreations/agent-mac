@@ -88,6 +88,16 @@ done
 defaults write "\$sa" LastSeenCloudProductVersion "\$v"; defaults write "\$sa" LastSeenBuddyBuildVersion "\$b"
 defaults write "\$sa" SkipFirstLoginOptimization -bool true
 chown "\$u:staff" "\$sa"
+# loginwindow opens Setup Assistant's Apple Account sheet (-MiniBuddy) after
+# login while this is set; the DidSee keys above don't stop it.
+lw="\$h/Library/Preferences/com.apple.loginwindow.plist"
+defaults write "\$lw" MiniBuddyLaunch -bool false
+# Without loginwindow's per-user OS stamp, UserAccountUpdater treats the first
+# login as a new user and its MiniBuddyLauncher plugin sets the key back to 1.
+st="\$h/Library/Preferences/loginwindow.plist"
+defaults write "\$st" SystemVersionStampAsString "\$v"
+defaults write "\$st" BuildVersionStampAsString "\$b"
+chown "\$u:staff" "\$lw" "\$st"
 defaults write /Library/Preferences/com.apple.SubmitDiagInfo AutoSubmit -bool false
 touch /Library/agent-vm/firstboot.done
 rm -f /Library/LaunchDaemons/dev.agent-vm.firstboot.plist
