@@ -5,8 +5,9 @@ description: Use when you need to run, click through, screenshot or record a Mac
 
 # Driving a Mac app in an agent-vm guest
 
-The guest is a headless macOS VM. You reach it only through `vm` in the
-agent-vm checkout; the commands below run from there. Never drive the
+The guest is a headless macOS VM. You reach it only through `vm`: `./vm` in
+an agent-vm checkout, or `agent-vm` when it's installed with Homebrew
+(`command -v agent-vm`). The commands below use `./vm`. Never drive the
 host's own screen for a UI check when a guest will do: the host's display,
 pointer and keyboard belong to the person.
 
@@ -22,6 +23,10 @@ would prompt. Then ask the person to run `sudo -v` in your terminal, or to set
 `SUDO_ASKPASS`. Don't retry with guesses. The first `vm up` on a machine
 downloads about 25 GB and takes 10–20 minutes; tell the person before you
 start it, and confirm the connection isn't metered.
+
+Each new guest gets the Command Line Tools and Homebrew, about 8 more minutes
+the first time, so `brew install` works in it (`./vm ssh 'zsh -lc "brew …"'`).
+`VM_BREW=0` skips that.
 
 At most two macOS guests run at once. Use `VM_NAME=<name>` for a separate
 guest, and `vm down` the ones you're done with.

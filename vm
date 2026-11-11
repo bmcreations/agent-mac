@@ -21,17 +21,23 @@
 #   vm view [--control] [--remote]  open the guest desktop in a browser (voxl)
 #   vm view stop               stop voxl and its forwards
 #
-# VM_HOME (default <repo>/.vm) holds the restore image, guests, ssh key and logs.
+# Installed with Homebrew the command is agent-vm.
+#
+# VM_HOME (default <repo>/.vm in a checkout, ~/.agent-vm installed) holds the restore image, guests, ssh key and logs.
 # VM_NAME (default agent-vm) names the guest; VM_CPU, VM_MEMORY_MB, VM_DISK_GB.
+# VM_BREW=0 skips Homebrew in the guest (about 8 minutes on a new guest).
 set -euo pipefail
 
-here=$(cd "$(dirname "$0")" && pwd)
-VM_HOME=${VM_HOME:-$here/.vm}
+# Resolve symlinks: Homebrew links bin/agent-vm to this file in libexec.
+here=$(dirname "$(readlink -f "$0")")
+# A checkout keeps its state beside the code; an installed copy in ~/.agent-vm.
+if [ -d "$here/.git" ]; then VM_HOME=${VM_HOME:-$here/.vm}; else VM_HOME=${VM_HOME:-$HOME/.agent-vm}; fi
 VM_NAME=${VM_NAME:-agent-vm}
 VM_CPU=${VM_CPU:-4}
 VM_MEMORY_MB=${VM_MEMORY_MB:-8192}
 VM_DISK_GB=${VM_DISK_GB:-80}
-RUNNER=${RUNNER:-$here/runner/.build/release/agent-vm-runner}
+if [ -x "$here/agent-vm-runner" ]; then RUNNER=${RUNNER:-$here/agent-vm-runner}
+else RUNNER=${RUNNER:-$here/runner/.build/release/agent-vm-runner}; fi
 VOXL_VERSION=${VOXL_VERSION:-0.3.4}
 VIEW_PORT=${VIEW_PORT:-16901}
 GUEST_USER=admin GUEST_PASS=admin
@@ -196,6 +202,11 @@ PY
   # Autologin: the desktop belongs to the guest user before anything captures it.
   local i; for i in $(seq 60); do [ "$(g 'stat -f %Su /dev/console')" = "$GUEST_USER" ] && break; sleep 2; done
   cmd_setup
+  if [ "${VM_BREW:-1}" = 1 ] && ! done_step brew; then
+    log "installing the Command Line Tools and Homebrew in the guest (about 8 min; log ~/vm/brew-setup.log)"
+    g "/bin/bash -s" < "$here/guest/brew-setup.sh" || die "Homebrew setup failed; see ~/vm/brew-setup.log in the guest"
+    mark brew
+  fi
   log "up at $(ip)"
 }
 
@@ -368,6 +379,11 @@ cmd_view() {
     shift
   done
   running || die "$VM_NAME is not running; vm up first"
+  if ! g "test -x /opt/homebrew/bin/brew"; then
+    log "voxl builds with Homebrew; installing it in the guest first (about 8 min)"
+    g "/bin/bash -s" < "$here/guest/brew-setup.sh" || die "Homebrew setup failed; see ~/vm/brew-setup.log in the guest"
+    done_step brew || mark brew
+  fi
   if [ "$(g "voxl --version 2>/dev/null | awk '{print \$NF}'")" != "$VOXL_VERSION" ]; then
     log "building voxl $VOXL_VERSION in the guest (about 10 min the first time; log ~/vm/voxl-build.log)"
     g "VOXL_VERSION=$VOXL_VERSION /bin/bash -s" < "$here/guest/voxl-build.sh" ||
@@ -445,5 +461,6 @@ c=${1:-}; shift || true
 case $c in
   up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view) "cmd_$c" "$@" ;;
   forward-host) cmd_forward_host "$@" ;;
-  *) sed -n 2,24p "$0"; exit 2 ;;
+  help|-h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- >&2; exit 2 ;;
 esac

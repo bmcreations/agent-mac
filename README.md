@@ -12,11 +12,24 @@ runner in this repo, installed from Apple's own restore image. Nobody clicks
 through Setup Assistant: `provision` writes the setup onto the guest's disk
 from the host.
 
+## Install
+
+```sh
+brew install bmcreations/tap/agent-vm
+```
+
+This builds and signs the runner and installs the command as `agent-vm`, with
+`agent-desktop` and `ffmpeg` as dependencies. Guests, the restore image and
+the ssh key go in `~/.agent-vm` (`VM_HOME` moves them). The examples below use
+`./vm` from a checkout; installed, run `agent-vm` instead.
+
+From a checkout, `make runner` builds the runner and state goes in `.vm/`.
+
 ## Requirements
 
 - An Apple silicon Mac on macOS 14 or later, with the Xcode Command Line Tools
 - `agent-desktop` on the host (`brew install agent-desktop`); `vm up` copies it
-  into the guest
+  into the guest. `ffmpeg` for `vm record`'s frame counts.
 - About 30 GB for the restore image and 80 GB of disk per guest, which fills
   only as it's used. Guests are APFS clones of one base install, so a second
   guest starts at almost nothing.
@@ -29,7 +42,7 @@ macOS runs at most two macOS guests at a time.
 ## Use
 
 ```sh
-make runner                                # build and sign the runner
+make runner                                # in a checkout: build and sign the runner
 ./vm up                                    # first run: download, install, provision
 ./vm install path/to/App.app "abc1234 built 11:08"
 ./vm run
@@ -61,8 +74,8 @@ and logs live in `.vm/` (gitignored).
 ./vm view stop
 ```
 
-The first `vm view` builds voxl in the guest, which takes about 10 minutes on
-a new guest (the Command Line Tools and Homebrew are most of it). voxl's
+The first `vm view` builds voxl in the guest with the guest's Homebrew, which
+takes about 2 minutes. voxl's
 binary links x264, which is GPL, so agent-vm never ships one; each guest
 builds the pinned version from source.
 
