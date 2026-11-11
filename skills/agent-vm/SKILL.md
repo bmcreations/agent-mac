@@ -24,9 +24,10 @@ would prompt. Then ask the person to run `sudo -v` in your terminal, or to set
 downloads about 25 GB and takes 10–20 minutes; tell the person before you
 start it, and confirm the connection isn't metered.
 
-Each new guest gets the Command Line Tools and Homebrew, about 8 more minutes
-the first time, so `brew install` works in it (`./vm ssh 'zsh -lc "brew …"'`).
-`VM_BREW=0` skips that.
+The first `vm up` on a machine also builds a prepared guest with the Command
+Line Tools, Homebrew and voxl (about 10 minutes once); new guests copy it and
+are up in about 20 seconds. `brew install` works in the guest (`./vm ssh 'zsh -lc "brew …"'`).
+`VM_BREW=0` skips that. After updating agent-vm, `./vm prepare --rebuild`.
 
 At most two macOS guests run at once. Use `VM_NAME=<name>` for a separate
 guest, and `vm down` the ones you're done with.

@@ -7,6 +7,7 @@
 #
 #   vm up                      create (first time), provision, boot headless, set up
 #   vm down                    shut the guest down
+#   vm prepare [--rebuild]     build the set-up guest that new guests copy
 #   vm status                  guest state, IP, host lock, guest power/lock settings
 #   vm ssh [cmd...]            a shell, or one command, in the guest
 #   vm install <App.app> [build label]
@@ -25,7 +26,8 @@
 #
 # VM_HOME (default <repo>/.vm in a checkout, ~/.agent-vm installed) holds the restore image, guests, ssh key and logs.
 # VM_NAME (default agent-vm) names the guest; VM_CPU, VM_MEMORY_MB, VM_DISK_GB.
-# VM_BREW=0 skips Homebrew in the guest (about 8 minutes on a new guest).
+# New guests copy a prepared guest with Homebrew and voxl (built once by vm
+# prepare); VM_BREW=0 starts from the bare install and skips Homebrew.
 set -euo pipefail
 
 # Resolve symlinks: Homebrew links bin/agent-vm to this file in libexec.
@@ -43,6 +45,7 @@ VIEW_PORT=${VIEW_PORT:-16901}
 GUEST_USER=admin GUEST_PASS=admin
 guests=$VM_HOME/guests
 base=$guests/base.bundle
+ready=$guests/ready.bundle
 bundle=$guests/$VM_NAME.bundle
 state=$bundle/agent-vm.state
 JOB=dev.agent-vm.$VM_NAME
@@ -157,6 +160,37 @@ shutdown_guest() {
   launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
 }
 
+# An APFS clone: instant, and it takes space only as the copies differ. The
+# copy gets its own MAC and no viewer token; "keep" keeps the source's steps.
+clone_from() {
+  rm -rf "$bundle.tmp"
+  cp -cR "$1" "$bundle.tmp"
+  if [ "${2:-}" = keep ]; then grep -vx ready "$1/agent-vm.state" > "$bundle.tmp/agent-vm.state" || true
+  else : > "$bundle.tmp/agent-vm.state"; fi
+  rm -f "$bundle.tmp/voxl-token"
+  python3 -I - "$bundle.tmp/config.json" <<'PY2'
+import json, random, sys
+p = sys.argv[1]; c = json.load(open(p))
+c["mac"] = ":".join(["%02x" % ((random.randrange(256) | 2) & 0xfe)] + ["%02x" % random.randrange(256) for _ in range(5)])
+json.dump(c, open(p, "w"))
+PY2
+  mv "$bundle.tmp" "$bundle"
+}
+
+# The prepared guest new guests copy: provisioned, set up, with Homebrew and
+# voxl, shut down. Built once (about 10 min); --rebuild after updating
+# agent-vm so new guests get the new provisioning.
+cmd_prepare() {
+  [ "${1:-}" = --rebuild ] && { VM_NAME=ready "$0" down >/dev/null 2>&1 || true; rm -rf "$ready"; }
+  grep -qx ready "$ready/agent-vm.state" 2>/dev/null && { log "prepared guest is up to date"; return; }
+  log "preparing the guest new guests copy (once, about 10 min)"
+  VM_NAME=ready VM_BREW=1 "$0" up
+  VM_NAME=ready "$0" ssh "VOXL_VERSION=$VOXL_VERSION /bin/bash -s" < "$here/guest/voxl-build.sh" ||
+    die "voxl build in the prepared guest failed; see ~/vm/voxl-build.log there"
+  VM_NAME=ready "$0" down
+  echo ready >> "$ready/agent-vm.state"
+}
+
 # Each step is recorded in the bundle, so an interrupted vm up resumes.
 cmd_up() {
   [ -x "$RUNNER" ] || die "no runner at $RUNNER; run make runner"
@@ -168,17 +202,16 @@ cmd_up() {
       caffeinate -i "$RUNNER" create "$base" "$img" --disk-gb "$VM_DISK_GB" --cpu "$VM_CPU" --memory-mb "$VM_MEMORY_MB"
       echo installed > "$base/agent-vm.state"
     fi
-    # An APFS clone: instant, and it takes space only as the copies differ.
-    cp -cR "$base" "$bundle.tmp"
-    : > "$bundle.tmp/agent-vm.state"
-    python3 -I - "$bundle.tmp/config.json" <<'PY'
-import json, random, sys
-p = sys.argv[1]; c = json.load(open(p))
-c["mac"] = ":".join(["%02x" % ((random.randrange(256) | 2) & 0xfe)] + ["%02x" % random.randrange(256) for _ in range(5)])
-json.dump(c, open(p, "w"))
-PY
-    mv "$bundle.tmp" "$bundle"
-    log "created $VM_NAME from the base install"
+    # Copy the prepared guest when there is one to copy: it already has every
+    # step below plus Homebrew and voxl. Otherwise start from the bare install.
+    if [ "$VM_NAME" != ready ] && [ "${VM_BREW:-1}" = 1 ]; then
+      grep -qx ready "$ready/agent-vm.state" 2>/dev/null || cmd_prepare
+      clone_from "$ready" keep
+      log "created $VM_NAME from the prepared guest"
+    else
+      clone_from "$base"
+      log "created $VM_NAME from the base install"
+    fi
   fi
   if ! done_step base; then
     running && die "$VM_NAME is running but not provisioned; vm down first"
@@ -220,11 +253,16 @@ sudo sysadminctl -screenLock off -password $GUEST_PASS >/dev/null 2>&1 || true
 mkdir -p ~/Applications ~/vm/rec ~/vm/bin
 EOF
   mkdir -p "$VM_HOME/bin"
-  local t
+  local t bin
   for t in vsync rec; do
-    [ "$VM_HOME/bin/$t" -nt "$here/guest/$t.swift" ] ||
-      xcrun swiftc -O -target arm64-apple-macos14 -o "$VM_HOME/bin/$t" "$here/guest/$t.swift"
-    g "cat > ~/vm/bin/$t && chmod +x ~/vm/bin/$t" < "$VM_HOME/bin/$t"
+    # A release ships them built; a checkout compiles them once.
+    bin=$here/guest-bin/$t
+    if [ ! -x "$bin" ]; then
+      bin=$VM_HOME/bin/$t
+      [ "$bin" -nt "$here/guest/$t.swift" ] ||
+        xcrun swiftc -O -target arm64-apple-macos14 -o "$bin" "$here/guest/$t.swift"
+    fi
+    g "cat > ~/vm/bin/$t && chmod +x ~/vm/bin/$t" < "$bin"
   done
   # agent-desktop: the host's copy, the launcher and its macOS helper (arm64).
   local ad; ad=$(command -v agent-desktop || true)
@@ -459,7 +497,7 @@ view_stop() {
 
 c=${1:-}; shift || true
 case $c in
-  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view) "cmd_$c" "$@" ;;
+  up|down|status|ssh|setup|install|run|quit|ad|record|shot|vsync|view|prepare) "cmd_$c" "$@" ;;
   forward-host) cmd_forward_host "$@" ;;
   help|-h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | cut -c3- >&2; exit 2 ;;

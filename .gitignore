@@ -1,3 +1,5 @@
 .vm/
 .build/
 *.ipsw
+guest-bin/
+dist/

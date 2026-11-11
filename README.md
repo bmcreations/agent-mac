@@ -18,7 +18,8 @@ from the host.
 brew install bmcreations/tap/agent-vm
 ```
 
-This builds and signs the runner and installs the command as `agent-vm`, with
+This downloads the release's prebuilt, signed runner and guest tools, so
+nothing is compiled, and installs the command as `agent-vm`, with
 `agent-desktop` and `ffmpeg` as dependencies. Guests, the restore image and
 the ssh key go in `~/.agent-vm` (`VM_HOME` moves them). The examples below use
 `./vm` from a checkout; installed, run `agent-vm` instead.
@@ -38,6 +39,15 @@ From a checkout, `make runner` builds the runner and state goes in `.vm/`.
   `SUDO_ASKPASS`.
 
 macOS runs at most two macOS guests at a time.
+
+## The prepared guest
+
+The first `vm up` also builds `ready`, a provisioned guest with the Command
+Line Tools, Homebrew and voxl installed, then shuts it down. Every new guest
+is an APFS copy of it, so after that first run a new guest is up in about 20
+seconds instead of 10 minutes. After updating agent-vm, run
+`vm prepare --rebuild` so new guests get the new provisioning. `VM_BREW=0`
+skips it and starts from the bare install.
 
 ## Use
 
@@ -74,8 +84,8 @@ and logs live in `.vm/` (gitignored).
 ./vm view stop
 ```
 
-The first `vm view` builds voxl in the guest with the guest's Homebrew, which
-takes about 2 minutes. voxl's
+voxl comes with the prepared guest (below), so `vm view` doesn't build
+anything. A guest made with `VM_BREW=0` builds it on the first `vm view`. voxl's
 binary links x264, which is GPL, so agent-vm never ships one; each guest
 builds the pinned version from source.
 
