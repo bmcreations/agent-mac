@@ -1,10 +1,10 @@
-# agent-vm
+# agent-mac
 
 Headless macOS guests for AI agents: install a Mac app, drive it with agent-desktop, record it at 60 fps, and let people watch or take over in a browser.
 
 <p>
-  <a href="https://github.com/bmcreations/agent-vm/releases"><img src="https://img.shields.io/github/v/release/bmcreations/agent-vm" alt="release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/bmcreations/agent-vm" alt="MIT license"></a>
+  <a href="https://github.com/bmcreations/agent-mac/releases"><img src="https://img.shields.io/github/v/release/bmcreations/agent-mac" alt="release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/bmcreations/agent-mac" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20silicon-black" alt="macOS 14+ on Apple silicon">
 </p>
 
@@ -13,49 +13,49 @@ UI checks run in the guest, so they leave the host's display, pointer and keyboa
 ## Install
 
 ```sh
-brew install bmcreations/tap/agent-vm
+brew install bmcreations/tap/agent-mac
 sudo -v          # provisioning writes to the guest's disk as root
-agent-vm up
+agent-mac up
 ```
 
-The first `agent-vm up` downloads the newest restore image Apple offers (about 25 GB, resumable), installs it, and builds a prepared guest with Homebrew and voxl. That takes half an hour or more, once. After that a new guest is up in about 20 seconds.
+The first `agent-mac up` downloads the newest restore image Apple offers (about 25 GB, resumable), installs it, and builds a prepared guest with Homebrew and voxl. That takes half an hour or more, once. After that a new guest is up in about 20 seconds.
 
 ## Quick start
 
 ```sh
-agent-vm install path/to/App.app "abc1234"   # copy a build in, with a label
-agent-vm run                                 # launch it and wait for its window
-agent-vm ad find --app App --name Open --first   # agent-desktop in the guest
-agent-vm ad click <ref_id from find>
-agent-vm down
+agent-mac install path/to/App.app "abc1234"   # copy a build in, with a label
+agent-mac run                                 # launch it and wait for its window
+agent-mac ad find --app App --name Open --first   # agent-desktop in the guest
+agent-mac ad click <ref_id from find>
+agent-mac down
 ```
 
-Clicking, typing and reading the screen are [agent-desktop](https://agent-browser.dev/desktop)'s job: `agent-vm ad` passes its arguments straight to it inside the guest. `agent-vm ad skills get desktop` prints its guide for the installed version.
+Clicking, typing and reading the screen are [agent-desktop](https://agent-browser.dev/desktop)'s job: `agent-mac ad` passes its arguments straight to it inside the guest. `agent-mac ad skills get desktop` prints its guide for the installed version.
 
 To check motion rather than a still state, record around the action:
 
 ```sh
-agent-vm record start 30
-agent-vm ad click <ref>
-agent-vm record stop ./recordings open-panel   # .mov, .ticks.json, .fps.json, .actions.json
+agent-mac record start 30
+agent-mac ad click <ref>
+agent-mac record stop ./recordings open-panel   # .mov, .ticks.json, .fps.json, .actions.json
 ```
 
-`open-panel.actions.json` lines each `agent-vm ad` call up with the frames, so you can see when the screen first changed after the click.
+`open-panel.actions.json` lines each `agent-mac ad` call up with the frames, so you can see when the screen first changed after the click.
 
 For runs that compare, fix the guest's screen, look and language, and keep a snapshot to start from:
 
 ```sh
-agent-vm up --display 1440x900 --appearance dark --locale de_DE
-agent-vm save logged-in        # memory and disks; the guest stops
-agent-vm restore logged-in     # back to that moment, as often as you like
+agent-mac up --display 1440x900 --appearance dark --locale de_DE
+agent-mac save logged-in        # memory and disks; the guest stops
+agent-mac restore logged-in     # back to that moment, as often as you like
 ```
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  agent["Agent shell"] -- "agent-vm …" --> vm["vm"]
-  vm --> runner["agent-vm-runner<br/>Virtualization.framework"]
+  agent["Agent shell"] -- "agent-mac …" --> vm["vm"]
+  vm --> runner["agent-mac-runner<br/>Virtualization.framework"]
   vm -- "ssh" --> guest
   runner --> guest
   subgraph guest["macOS guest"]
@@ -67,31 +67,31 @@ flowchart LR
   browser["Browser"] -- "localhost or tailnet" --> voxl
 ```
 
-- `agent-vm-runner` installs the restore image and runs the guest without a window.
+- `agent-mac-runner` installs the restore image and runs the guest without a window.
 - `provision` writes the setup onto the stopped guest's disk from the host: the admin user, your ssh key, autologin, and the Accessibility and Screen Recording grants.
 - Every command after that runs in the guest over ssh. Guests are APFS copies of one prepared guest, so a new one takes almost no disk.
 
 ## For AI agents
 
-The repo ships two skills: `agent-vm` for driving an app in a guest, and `record-and-verify` for judging motion from a recording. In Claude Code:
+The repo ships two skills: `agent-mac` for driving an app in a guest, and `record-and-verify` for judging motion from a recording. In Claude Code:
 
 ```
-/plugin marketplace add bmcreations/agent-vm
-/plugin install agent-vm@agent-vm
+/plugin marketplace add bmcreations/agent-mac
+/plugin install agent-mac@agent-mac
 ```
 
 With skills.sh:
 
 ```sh
-npx skills add https://github.com/bmcreations/agent-vm --skill agent-vm --skill record-and-verify
+npx skills add https://github.com/bmcreations/agent-mac --skill agent-mac --skill record-and-verify
 ```
 
 Or add this to your project's `AGENTS.md`:
 
 ```md
-Check Mac UI in an agent-vm guest, never on the host's own screen. Before the
-first use, read `$(brew --prefix agent-vm)/share/agent-vm/skills/agent-vm/SKILL.md`
-and follow it. Exit code 3 means a person has control in `agent-vm view`: wait.
+Check Mac UI in an agent-mac guest, never on the host's own screen. Before the
+first use, read `$(brew --prefix agent-mac)/share/agent-mac/skills/agent-mac/SKILL.md`
+and follow it. Exit code 3 means a person has control in `agent-mac view`: wait.
 ```
 
 ## Commands
@@ -133,11 +133,11 @@ macOS runs at most two macOS guests at a time.
 
 ```sh
 make runner      # build and sign the runner with the virtualization entitlement
-./vm up          # from a checkout, state goes in .vm/ instead of ~/.agent-vm
+./vm up          # from a checkout, state goes in .vm/ instead of ~/.agent-mac
 ```
 
 Pushing a `v*` tag builds the release tarball in GitHub Actions, and the Homebrew formula installs that tarball.
 
 ## License
 
-MIT. voxl, which each guest builds from source, is MIT but links x264 (GPL), so agent-vm never ships a voxl binary.
+MIT. voxl, which each guest builds from source, is MIT but links x264 (GPL), so agent-mac never ships a voxl binary.

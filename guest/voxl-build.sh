@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build voxl in the guest (run by `vm view` over ssh). voxl's binary links x264,
-# which is GPL, so agent-vm never ships one; each guest builds the pinned
+# which is GPL, so agent-mac never ships one; each guest builds the pinned
 # version from crates.io, using the Homebrew that `vm up` installs. Steps
 # already done are skipped; the first build takes about 2 minutes.
 set -euo pipefail

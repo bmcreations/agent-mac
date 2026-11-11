@@ -1,15 +1,15 @@
-# agent-vm
+# agent-mac
 
 Instructions for agents working on this repo. For using a guest to check an
-app, read `skills/agent-vm/SKILL.md` and `skills/record-and-verify/SKILL.md`.
+app, read `skills/agent-mac/SKILL.md` and `skills/record-and-verify/SKILL.md`.
 
 ## Layout
 
 - `vm`: the whole CLI, one bash script. Guest commands run over ssh through
-  `g()`; `vm up` records each provisioning step in `<bundle>/agent-vm.state`.
+  `g()`; `vm up` records each provisioning step in `<bundle>/agent-mac.state`.
 - `provision`: writes setup onto a stopped guest's disk from the host. Runs as
   root. `provision check <bundle>` prints what's there.
-- `runner/`: `agent-vm-runner`, a Swift CLI on Virtualization.framework
+- `runner/`: `agent-mac-runner`, a Swift CLI on Virtualization.framework
   (`ipsw-url`, `create`, `run`, `mac`). `make runner` builds it and signs it
   with the virtualization entitlement; without that it dies at launch.
 - `guest/`: `rec.swift` and `vsync.swift` (built on the host, copied in),

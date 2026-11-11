@@ -27,4 +27,4 @@ With a viewer streaming a busy screen (a screensaver), a 10 s recording still dr
 
 ## License
 
-voxl is MIT but links x264, which is GPL, so agent-vm never ships a voxl binary. Each guest builds the pinned version from source.
+voxl is MIT but links x264, which is GPL, so agent-mac never ships a voxl binary. Each guest builds the pinned version from source.

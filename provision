@@ -31,7 +31,7 @@ mount_data() {
   local b; b=$(cd "$1" && pwd) || die "no bundle at $1"
   local img=$b/disk.img out vol
   [ -f "$img" ] || die "no disk.img in $b"
-  pgrep -f "agent-vm-runner run $b" >/dev/null && die "the guest is running; stop it first"
+  pgrep -f "agent-(mac|vm)-runner run $b( |$)" >/dev/null && die "the guest is running; stop it first"
   out=$(diskutil image attach --noMount "$img")
   disks=($(echo "$out" | awk '$1 ~ /^\/dev\/disk[0-9]+$/ {print $1}' | sort -u))
   vol=$(diskutil apfs list -plist | python3 -c '
@@ -41,7 +41,7 @@ for c in plistlib.loads(sys.stdin.buffer.read())["Containers"]:
         if "Data" in v.get("Roles", []) and v.get("Name") == "Data" and c["PhysicalStores"][0]["DeviceIdentifier"].rstrip("0123456789").rstrip("s") in sys.argv[1:]:
             print(v["DeviceIdentifier"])' $(for d in "${disks[@]}"; do basename "$d"; done) | tail -1)
   [ -n "$vol" ] || die "no Data volume found in $img"
-  mnt=$(mktemp -d "${TMPDIR:-/tmp}/agent-vm-data.XXXX")
+  mnt=$(mktemp -d "${TMPDIR:-/tmp}/agent-mac-data.XXXX")
   diskutil mount -mountPoint "$mnt" "$vol" >/dev/null
   sudo diskutil enableOwnership "$mnt" >/dev/null
   DATA=$mnt
@@ -51,7 +51,7 @@ cmd_base() {
   local bundle=${1:?usage: provision base <bundle> <ssh-pubkey>} pub=${2:?ssh public key file}
   [ -f "$pub" ] || die "no public key at $pub"
   mount_data "$bundle"; local d=$DATA
-  sudo mkdir -p "$d/private/var/db" "$d/Library/LaunchDaemons" "$d/Library/agent-vm"
+  sudo mkdir -p "$d/private/var/db" "$d/Library/LaunchDaemons" "$d/Library/agent-mac"
   sudo touch "$d/private/var/db/.AppleSetupDone"
   # sysadminctl -autologin records the user but never writes kcpassword on
   # 27.2, and the guest has no python, so encode it here (XOR, 12-byte pad).
@@ -61,20 +61,20 @@ k=[0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F]
 p=bytearray(sys.argv[1].encode()); p+=bytes(12-len(p)%12)
 sys.stdout.buffer.write(bytes(c^k[i%11] for i,c in enumerate(p)))' "$GUEST_PASS" | sudo tee "$d/private/etc/kcpassword" >/dev/null
   sudo chown 0:0 "$d/private/etc/kcpassword"; sudo chmod 600 "$d/private/etc/kcpassword"
-  sudo cp "$pub" "$d/Library/agent-vm/authorized_keys"
-  sudo tee "$d/Library/agent-vm/firstboot.sh" >/dev/null <<EOF
+  sudo cp "$pub" "$d/Library/agent-mac/authorized_keys"
+  sudo tee "$d/Library/agent-mac/firstboot.sh" >/dev/null <<EOF
 #!/bin/bash
 # Runs once as root at the guest's first boot, then removes itself.
-exec >>/var/log/agent-vm-firstboot.log 2>&1
+exec >>/var/log/agent-mac-firstboot.log 2>&1
 set -x
 u=$GUEST_USER p=$GUEST_PASS
 if ! id "\$u" >/dev/null 2>&1; then
   sysadminctl -addUser "\$u" -fullName "\$u" -password "\$p" -admin
 fi
 sysadminctl -autologin set -userName "\$u" -password "\$p"
-echo "\$u ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/agent-vm; chmod 440 /etc/sudoers.d/agent-vm
+echo "\$u ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/agent-mac; chmod 440 /etc/sudoers.d/agent-mac
 h=\$(dscl . -read /Users/\$u NFSHomeDirectory | awk '{print \$2}')
-mkdir -p "\$h/.ssh" && cp /Library/agent-vm/authorized_keys "\$h/.ssh/authorized_keys"
+mkdir -p "\$h/.ssh" && cp /Library/agent-mac/authorized_keys "\$h/.ssh/authorized_keys"
 chown -R "\$u:staff" "\$h/.ssh"; chmod 700 "\$h/.ssh"; chmod 600 "\$h/.ssh/authorized_keys"
 launchctl enable system/com.openssh.sshd
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist || launchctl kickstart -k system/com.openssh.sshd
@@ -101,21 +101,21 @@ defaults write "\$st" SystemVersionStampAsString "\$v"
 defaults write "\$st" BuildVersionStampAsString "\$b"
 chown "\$u:staff" "\$lw" "\$st"
 defaults write /Library/Preferences/com.apple.SubmitDiagInfo AutoSubmit -bool false
-touch /Library/agent-vm/firstboot.done
-rm -f /Library/LaunchDaemons/dev.agent-vm.firstboot.plist
+touch /Library/agent-mac/firstboot.done
+rm -f /Library/LaunchDaemons/dev.agent-mac.firstboot.plist
 EOF
-  sudo chmod 755 "$d/Library/agent-vm/firstboot.sh"
-  sudo tee "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist" >/dev/null <<'EOF'
+  sudo chmod 755 "$d/Library/agent-mac/firstboot.sh"
+  sudo tee "$d/Library/LaunchDaemons/dev.agent-mac.firstboot.plist" >/dev/null <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>dev.agent-vm.firstboot</string>
-  <key>ProgramArguments</key><array><string>/Library/agent-vm/firstboot.sh</string></array>
+  <key>Label</key><string>dev.agent-mac.firstboot</string>
+  <key>ProgramArguments</key><array><string>/Library/agent-mac/firstboot.sh</string></array>
   <key>RunAtLoad</key><true/>
 </dict></plist>
 EOF
-  sudo chown -R 0:0 "$d/Library/agent-vm" "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist" "$d/private/var/db/.AppleSetupDone"
-  sudo chmod 644 "$d/Library/LaunchDaemons/dev.agent-vm.firstboot.plist"
+  sudo chown -R 0:0 "$d/Library/agent-mac" "$d/Library/LaunchDaemons/dev.agent-mac.firstboot.plist" "$d/private/var/db/.AppleSetupDone"
+  sudo chmod 644 "$d/Library/LaunchDaemons/dev.agent-mac.firstboot.plist"
   log "base written to $bundle; boot it once, then run: provision tcc $bundle"
 }
 
@@ -157,8 +157,8 @@ sys.stdout.buffer.write(plistlib.dumps({sys.argv[1]: rec}))' "$c" \
 
 cmd_check() {
   mount_data "${1:?usage: provision check <bundle>}"; local d=$DATA
-  sudo ls -la "$d/private/var/db/.AppleSetupDone" "$d/Library/agent-vm" 2>&1 || true
-  sudo cat "$d/private/var/log/agent-vm-firstboot.log" 2>/dev/null | tail -20 || true
+  sudo ls -la "$d/private/var/db/.AppleSetupDone" "$d/Library/agent-mac" 2>&1 || true
+  sudo cat "$d/private/var/log/agent-mac-firstboot.log" 2>/dev/null | tail -20 || true
   sudo sqlite3 "$d/Library/Application Support/com.apple.TCC/TCC.db" "select service, client, auth_value from access" 2>&1 || true
 }
 

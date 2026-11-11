@@ -1,7 +1,7 @@
 {
-  "name": "agent-vm",
+  "name": "agent-mac",
   "owner": { "name": "Brandon McAnsh", "url": "https://github.com/bmcreations" },
   "plugins": [
-    { "name": "agent-vm", "source": "./" }
+    { "name": "agent-mac", "source": "./" }
   ]
 }

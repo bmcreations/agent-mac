@@ -1,13 +1,13 @@
 ---
-name: agent-vm
+name: agent-mac
 description: Use when you need to run, click through, screenshot or record a Mac app's UI and the host's screen, mouse or keyboard belong to a person, the host may be locked, or a person wants to watch or take over the run in a browser.
 ---
 
-# Driving a Mac app in an agent-vm guest
+# Driving a Mac app in an agent-mac guest
 
 The guest is a headless macOS VM. You reach it only through `vm`: `./vm` in
-an agent-vm checkout, or `agent-vm` when it's installed with Homebrew
-(`command -v agent-vm`). The commands below use `./vm`. Never drive the
+an agent-mac checkout, or `agent-mac` when it's installed with Homebrew
+(`command -v agent-mac`). The commands below use `./vm`. Never drive the
 host's own screen for a UI check when a guest will do: the host's display,
 pointer and keyboard belong to the person.
 
@@ -27,7 +27,7 @@ start it, and confirm the connection isn't metered.
 The first `vm up` on a machine also builds a prepared guest with the Command
 Line Tools, Homebrew and voxl (about 10 minutes once); new guests copy it and
 are up in about 20 seconds. `brew install` works in the guest (`./vm ssh 'zsh -lc "brew …"'`).
-`VM_BREW=0` skips that. After updating agent-vm, `./vm prepare --rebuild`.
+`VM_BREW=0` skips that. After updating agent-mac, `./vm prepare --rebuild`.
 
 For runs that must compare, fix the environment once; it sticks for later
 `vm up`:

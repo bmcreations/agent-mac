@@ -30,33 +30,46 @@
 #                              run, quit and install exit 3 until vm view or vm view stop
 #   vm view stop               stop voxl and its forwards
 #
-# Installed with Homebrew the command is agent-vm.
+# Installed with Homebrew the command is agent-mac.
 #
-# VM_HOME (default <repo>/.vm in a checkout, ~/.agent-vm installed) holds the restore image, guests, ssh key and logs.
-# VM_NAME (default agent-vm) names the guest; VM_CPU, VM_MEMORY_MB, VM_DISK_GB.
+# VM_HOME (default <repo>/.vm in a checkout, ~/.agent-mac installed) holds the restore image, guests, ssh key and logs.
+# VM_NAME (default agent-mac) names the guest; VM_CPU, VM_MEMORY_MB, VM_DISK_GB.
 # New guests copy a prepared guest with Homebrew and voxl (built once by vm
 # prepare); VM_BREW=0 starts from the bare install and skips Homebrew.
 set -euo pipefail
 
-# Resolve symlinks: Homebrew links bin/agent-vm to this file in libexec.
+# Resolve symlinks: Homebrew links bin/agent-mac to this file in libexec.
 here=$(dirname "$(readlink -f "$0")")
-# A checkout keeps its state beside the code; an installed copy in ~/.agent-vm.
-if [ -d "$here/.git" ]; then VM_HOME=${VM_HOME:-$here/.vm}; else VM_HOME=${VM_HOME:-$HOME/.agent-vm}; fi
-VM_NAME=${VM_NAME:-agent-vm}
+# A checkout keeps its state beside the code; an installed copy in ~/.agent-mac.
+if [ -d "$here/.git" ]; then VM_HOME=${VM_HOME:-$here/.vm}; else VM_HOME=${VM_HOME:-$HOME/.agent-mac}; fi
+# agent-mac was called agent-vm up to 0.2. Move its state over once no guest
+# from that version is running (a running guest's launchd job points into it).
+if [ ! -e "$HOME/.agent-mac" ] && [ -d "$HOME/.agent-vm" ] && [ "$VM_HOME" = "$HOME/.agent-mac" ] &&
+   ! pgrep -f "agent-vm-runner run " >/dev/null; then
+  mv "$HOME/.agent-vm" "$HOME/.agent-mac" && echo "vm: moved ~/.agent-vm to ~/.agent-mac" >&2
+fi
+VM_NAME=${VM_NAME:-agent-mac}
 VM_CPU=${VM_CPU:-4}
 VM_MEMORY_MB=${VM_MEMORY_MB:-8192}
 VM_DISK_GB=${VM_DISK_GB:-80}
-if [ -x "$here/agent-vm-runner" ]; then RUNNER=${RUNNER:-$here/agent-vm-runner}
-else RUNNER=${RUNNER:-$here/runner/.build/release/agent-vm-runner}; fi
+if [ -x "$here/agent-mac-runner" ]; then RUNNER=${RUNNER:-$here/agent-mac-runner}
+else RUNNER=${RUNNER:-$here/runner/.build/release/agent-mac-runner}; fi
 VOXL_VERSION=${VOXL_VERSION:-0.3.4}
 VIEW_PORT=${VIEW_PORT:-16901}
 GUEST_USER=admin GUEST_PASS=admin
 guests=$VM_HOME/guests
+for f in "$guests"/*.bundle/agent-vm.state; do
+  [ -f "$f" ] && [ ! -e "${f%/*}/agent-mac.state" ] && mv "$f" "${f%/*}/agent-mac.state"
+done
+if [ "$VM_NAME" = agent-mac ] && [ -d "$guests/agent-vm.bundle" ] && [ ! -e "$guests/agent-mac.bundle" ] &&
+   ! pgrep -f "agent-vm-runner run $guests/agent-vm.bundle" >/dev/null; then
+  mv "$guests/agent-vm.bundle" "$guests/agent-mac.bundle"
+fi
 base=$guests/base.bundle
 ready=$guests/ready.bundle
 bundle=$guests/$VM_NAME.bundle
-state=$bundle/agent-vm.state
-JOB=dev.agent-vm.$VM_NAME
+state=$bundle/agent-mac.state
+JOB=dev.agent-mac.$VM_NAME
 VIEW_JOB=$JOB.view
 
 mkdir -p "$VM_HOME/ssh" "$VM_HOME/logs" "$VM_HOME/run" "$VM_HOME/ipsw" "$guests"
@@ -82,7 +95,13 @@ PY3
 # The runner is started with the bundle's absolute path, which provision's
 # running-guest guard matches too.
 # The runner for this guest, booted or restored (run <bundle> --restore <state>).
-runner_pat="agent-vm-runner run $bundle( |\$)"
+# agent-vm-runner is the name before 0.3; a guest it started is still this guest.
+runner_pat="agent-(mac|vm)-runner run $bundle( |\$)"
+# Unload this guest's runner job, under its current or pre-0.3 label.
+bootout_runner() {
+  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  launchctl bootout "gui/$(id -u)/dev.agent-vm.$VM_NAME" 2>/dev/null || true
+}
 running() { pgrep -f "$runner_pat" >/dev/null; }
 done_step() { grep -qx "$1" "$state" 2>/dev/null; }
 mark() { echo "$1" >> "$state"; }
@@ -177,13 +196,13 @@ EOF
 }
 
 shutdown_guest() {
-  running || { launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true; return; }
+  running || { bootout_runner; return; }
   g "sudo shutdown -h now" >/dev/null 2>&1 || true
   local i; for i in $(seq 60); do running || break; sleep 2; done
   # The runner asks the guest to stop on the first TERM and stops it on the second.
   running && { pkill -TERM -f "$runner_pat"; sleep 20; }
   running && pkill -TERM -f "$runner_pat"
-  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  bootout_runner
 }
 
 # An APFS clone: instant, and it takes space only as the copies differ. The
@@ -191,8 +210,8 @@ shutdown_guest() {
 clone_from() {
   rm -rf "$bundle.tmp"
   cp -cR "$1" "$bundle.tmp"
-  if [ "${2:-}" = keep ]; then grep -vx ready "$1/agent-vm.state" > "$bundle.tmp/agent-vm.state" || true
-  else : > "$bundle.tmp/agent-vm.state"; fi
+  if [ "${2:-}" = keep ]; then grep -vx ready "$1/agent-mac.state" > "$bundle.tmp/agent-mac.state" || true
+  else : > "$bundle.tmp/agent-mac.state"; fi
   rm -f "$bundle.tmp/voxl-token"
   python3 -I - "$bundle.tmp/config.json" <<'PY2'
 import json, random, sys
@@ -205,16 +224,16 @@ PY2
 
 # The prepared guest new guests copy: provisioned, set up, with Homebrew and
 # voxl, shut down. Built once (about 10 min); --rebuild after updating
-# agent-vm so new guests get the new provisioning.
+# agent-mac so new guests get the new provisioning.
 cmd_prepare() {
   [ "${1:-}" = --rebuild ] && { VM_NAME=ready "$0" down >/dev/null 2>&1 || true; rm -rf "$ready"; }
-  grep -qx ready "$ready/agent-vm.state" 2>/dev/null && { log "prepared guest is up to date"; return; }
+  grep -qx ready "$ready/agent-mac.state" 2>/dev/null && { log "prepared guest is up to date"; return; }
   log "preparing the guest new guests copy (once, about 10 min)"
   VM_NAME=ready VM_BREW=1 "$0" up
   VM_NAME=ready "$0" ssh "VOXL_VERSION=$VOXL_VERSION /bin/bash -s" < "$here/guest/voxl-build.sh" ||
     die "voxl build in the prepared guest failed; see ~/vm/voxl-build.log there"
   VM_NAME=ready "$0" down
-  echo ready >> "$ready/agent-vm.state"
+  echo ready >> "$ready/agent-mac.state"
 }
 
 # Each step is recorded in the bundle, so an interrupted vm up resumes.
@@ -233,17 +252,17 @@ cmd_up() {
   done
   [ -x "$RUNNER" ] || die "no runner at $RUNNER; run make runner"
   if ! exists; then
-    if [ ! -f "$base/config.json" ] || ! grep -qx installed "$base/agent-vm.state" 2>/dev/null; then
+    if [ ! -f "$base/config.json" ] || ! grep -qx installed "$base/agent-mac.state" 2>/dev/null; then
       local img; img=$(restore_image)
       rm -rf "$base"
       log "installing macOS into $base (10-20 min)"
       caffeinate -i "$RUNNER" create "$base" "$img" --disk-gb "$VM_DISK_GB" --cpu "$VM_CPU" --memory-mb "$VM_MEMORY_MB"
-      echo installed > "$base/agent-vm.state"
+      echo installed > "$base/agent-mac.state"
     fi
     # Copy the prepared guest when there is one to copy: it already has every
     # step below plus Homebrew and voxl. Otherwise start from the bare install.
     if [ "$VM_NAME" != ready ] && [ "${VM_BREW:-1}" = 1 ]; then
-      grep -qx ready "$ready/agent-vm.state" 2>/dev/null || cmd_prepare
+      grep -qx ready "$ready/agent-mac.state" 2>/dev/null || cmd_prepare
       clone_from "$ready" keep
       log "created $VM_NAME from the prepared guest"
     else
@@ -259,8 +278,8 @@ cmd_up() {
   if ! done_step firstboot; then
     running || boot
     # sshd starts partway through firstboot.sh; wait for the whole script.
-    local i; for i in $(seq 60); do g "test -f /Library/agent-vm/firstboot.done" 2>/dev/null && break; sleep 2; done
-    g "test -f /Library/agent-vm/firstboot.done" || die "first-boot setup did not finish; see /var/log/agent-vm-firstboot.log in the guest"
+    local i; for i in $(seq 60); do g "test -f /Library/agent-mac/firstboot.done || test -f /Library/agent-vm/firstboot.done" 2>/dev/null && break; sleep 2; done
+    g "test -f /Library/agent-mac/firstboot.done || test -f /Library/agent-vm/firstboot.done" || die "first-boot setup did not finish; see /var/log/agent-mac-firstboot.log in the guest"
     shutdown_guest
     mark firstboot
   fi
@@ -368,7 +387,7 @@ echo "screensaver idleTime: $(defaults -currentHost read com.apple.screensaver i
 echo "screenLock: $(sysadminctl -screenLock status 2>&1 | sed 's/.*] //')"
 pmset -g | awk '$1 ~ /^(sleep|displaysleep|disksleep)$/ {printf "pmset %s: %s\n", $1, $2}'
 echo "guest locked: $(ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked | grep -c '<true/>')"
-a=$(cat ~/Applications/.agent-vm-app 2>/dev/null); if [ -z "$a" ]; then echo "app: none installed"; elif pgrep -f "^$a/Contents/MacOS/" >/dev/null; then echo "app: $(basename "$a") running ($(cat ~/Applications/.agent-vm-build 2>/dev/null))"; else echo "app: $(basename "$a") not running"; fi
+a=$(cat ~/Applications/.agent-mac-app 2>/dev/null || cat ~/Applications/.agent-vm-app 2>/dev/null); if [ -z "$a" ]; then echo "app: none installed"; elif pgrep -f "^$a/Contents/MacOS/" >/dev/null; then echo "app: $(basename "$a") running ($(cat ~/Applications/.agent-mac-build 2>/dev/null))"; else echo "app: $(basename "$a") not running"; fi
 if pgrep -x voxl >/dev/null; then echo "voxl: running ($(cat ~/vm/voxl.mode 2>/dev/null))"; else echo "voxl: not running"; fi
 EOF
 }
@@ -376,7 +395,7 @@ EOF
 cmd_ssh() { if [ $# = 0 ]; then ssh -t "${sshopts[@]}" "$GUEST_USER@$(ip)"; else g "$@"; fi; }
 
 # The installed app's path in the guest; install records it.
-app() { g "cat ~/Applications/.agent-vm-app 2>/dev/null" || true; }
+app() { g "cat ~/Applications/.agent-mac-app 2>/dev/null || cat ~/Applications/.agent-vm-app 2>/dev/null" || true; }
 
 cmd_install() {
   refuse_if_held install
@@ -388,8 +407,8 @@ cmd_install() {
   # tar keeps the bundle's symlinks; scp -r does not.
   g "rm -rf $(q "Applications/$name") && mkdir -p ~/Applications"
   tar -C "$(dirname "$src")" -cf - "$name" | g "tar -C ~/Applications -xf - && xattr -cr $(q "Applications/$name")"
-  printf '%s\n' "$label" | g "cat > ~/Applications/.agent-vm-build"
-  printf '%s\n' "/Users/$GUEST_USER/Applications/$name" | g "cat > ~/Applications/.agent-vm-app"
+  printf '%s\n' "$label" | g "cat > ~/Applications/.agent-mac-build"
+  printf '%s\n' "/Users/$GUEST_USER/Applications/$name" | g "cat > ~/Applications/.agent-mac-app"
   log "installed: $label"
 }
 
@@ -571,7 +590,7 @@ cmd_save() {
     die "not saved, $VM_NAME is still running: ${why:-no reply from the runner}"
   fi
   [ -s "$bundle/state.vzvmsave" ] || die "the runner exited without a saved state; see $log"
-  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  bootout_runner
   rm -rf "$snaps/$name.tmp"; mkdir -p "$snaps/$name.tmp"
   mv "$bundle/state.vzvmsave" "$snaps/$name.tmp/"
   cp -c "$bundle/disk.img" "$bundle/aux.img" "$bundle/config.json" "$snaps/$name.tmp/"
@@ -591,7 +610,7 @@ cmd_restore() {
     local j; for j in $(seq 40); do running || break; sleep 0.25; done
     running && die "$VM_NAME did not stop"
   fi
-  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  bootout_runner
   # Keep the current disks, to fall back to a cold boot on them.
   local f; for f in disk.img aux.img config.json; do cp -c "$bundle/$f" "$bundle/$f.pre-restore"; cp -c "$snap/$f" "$bundle/$f"; done
   local i ok=0 try hung
@@ -610,7 +629,7 @@ cmd_restore() {
     # a refused one fails the same way again.
     [ "$ok" = 1 ] || [ "$hung" = 0 ] || [ "$try" = 2 ] && break
     log "no reply from the runner in 60 s; trying the restore once more"
-    launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true; pkill -KILL -f "$runner_pat" || true
+    bootout_runner; pkill -KILL -f "$runner_pat" || true
     for f in disk.img aux.img config.json; do cp -c "$snap/$f" "$bundle/$f"; done
   done
   if [ "$ok" = 1 ]; then
@@ -623,7 +642,7 @@ cmd_restore() {
   fi
   local why; why=$(tail -c +$((off + 1)) "$log" 2>/dev/null | grep 'could not' | tail -1 || true)
   [ "$hung" = 1 ] && why="no reply from the runner in 60 s"
-  launchctl bootout "gui/$(id -u)/$JOB" 2>/dev/null || true
+  bootout_runner
   for f in disk.img aux.img config.json; do mv "$bundle/$f.pre-restore" "$bundle/$f"; done
   log "could not restore $name (${why:-runner exited}); booting $VM_NAME cold instead"
   boot
@@ -640,7 +659,7 @@ cmd_shot() {
 }
 
 # voxl streams the guest desktop to a browser. Its binary links x264 (GPL), so
-# agent-vm never ships one: the first vm view builds the pinned version in the
+# agent-mac never ships one: the first vm view builds the pinned version in the
 # guest. voxl listens on the guest's loopback only; the host reaches it through
 # an ssh forward, and --remote also serves it on the host's tailnet name.
 cmd_view() {

@@ -7,7 +7,7 @@
 Check `$VM_HOME/logs/$VM_NAME-run.log`. If two other macOS guests are running, macOS won't start a third.
 
 **`first-boot setup did not finish`**
-Read `/var/log/agent-vm-firstboot.log` in the guest (`vm ssh cat /var/log/agent-vm-firstboot.log`).
+Read `/var/log/agent-mac-firstboot.log` in the guest (`vm ssh cat /var/log/agent-mac-firstboot.log`).
 
 **`agent-desktop is not on the host's PATH`**
 `brew install agent-desktop`. If an older npm install is in the way, `npm uninstall -g agent-desktop && brew link agent-desktop`.

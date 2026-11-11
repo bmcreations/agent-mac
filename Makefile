@@ -1,6 +1,6 @@
-RUNNER := runner/.build/release/agent-vm-runner
+RUNNER := runner/.build/release/agent-mac-runner
 VERSION ?= dev
-DIST := agent-vm-$(VERSION)
+DIST := agent-mac-$(VERSION)
 
 .PHONY: runner guest-bin dist clean
 
@@ -8,7 +8,7 @@ DIST := agent-vm-$(VERSION)
 # entitlement, so the binary is signed ad hoc with it after every build.
 runner:
 	cd runner && xcrun swift build -c release
-	codesign --force --sign - --entitlements runner/agent-vm-runner.entitlements $(RUNNER)
+	codesign --force --sign - --entitlements runner/agent-mac-runner.entitlements $(RUNNER)
 
 # The guest's recorder and refresh counter, built for the release.
 guest-bin:
@@ -20,7 +20,7 @@ guest-bin:
 dist: runner guest-bin
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)
 	cp -R vm provision fps guest guest-bin skills .claude-plugin AGENTS.md README.md LICENSE dist/$(DIST)/
-	cp $(RUNNER) dist/$(DIST)/agent-vm-runner
+	cp $(RUNNER) dist/$(DIST)/agent-mac-runner
 	tar -C dist -czf dist/$(DIST)-arm64-apple-darwin.tar.gz $(DIST)
 	shasum -a 256 dist/$(DIST)-arm64-apple-darwin.tar.gz
 

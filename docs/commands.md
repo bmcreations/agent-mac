@@ -1,6 +1,6 @@
 # Commands
 
-Installed with Homebrew the command is `agent-vm`; from a checkout it is `./vm`.
+Installed with Homebrew the command is `agent-mac`; from a checkout it is `./vm`.
 
 ## Guest
 
@@ -13,7 +13,7 @@ Installed with Homebrew the command is `agent-vm`; from a checkout it is `./vm`.
 | `save [name]` | Save the running guest's memory and disks as snapshot `name` (default `default`) and stop it. Needs the host screen unlocked. |
 | `restore [name]` | Resume a snapshot where it was saved. Boots the guest cold on its own disks if the snapshot can't be restored. |
 | `down` | Shut the guest down over ssh and wait for it to stop. |
-| `prepare [--rebuild]` | Build the prepared guest that new guests copy. `--rebuild` after updating agent-vm. |
+| `prepare [--rebuild]` | Build the prepared guest that new guests copy. `--rebuild` after updating agent-mac. |
 | `status` | Guest state and IP, snapshots, any hold, host lock state, the guest's lock, sleep and autologin settings, the installed app, and voxl. |
 | `ssh [cmd...]` | A shell in the guest, or one command. |
 | `setup` | Copy agent-desktop and the guest tools in. `up` runs it. |
@@ -64,8 +64,8 @@ Installed with Homebrew the command is `agent-vm`; from a checkout it is `./vm`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VM_HOME` | `~/.agent-vm` installed, `.vm/` in a checkout | Restore image, guests, ssh key and logs |
-| `VM_NAME` | `agent-vm` | Which guest |
+| `VM_HOME` | `~/.agent-mac` installed, `.vm/` in a checkout | Restore image, guests, ssh key and logs |
+| `VM_NAME` | `agent-mac` | Which guest |
 | `VM_CPU` | `4` | Guest CPUs |
 | `VM_MEMORY_MB` | `8192` | Guest memory |
 | `VM_DISK_GB` | `80` | Guest disk, sparse |

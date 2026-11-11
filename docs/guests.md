@@ -4,7 +4,7 @@
 
 The first `vm up` also builds `ready`: a provisioned guest with the Command Line Tools, Homebrew and voxl installed, shut down. Every new guest is an APFS copy of it, with its own MAC address and no viewer token, so after that first run a new guest is up in about 20 seconds instead of about 10 minutes.
 
-After updating agent-vm, run `vm prepare --rebuild` so new guests get the new provisioning. `VM_BREW=0` skips the prepared guest and starts from the bare install.
+After updating agent-mac, run `vm prepare --rebuild` so new guests get the new provisioning. `VM_BREW=0` skips the prepared guest and starts from the bare install.
 
 ## A fixed environment
 

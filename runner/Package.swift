@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "agent-vm-runner",
+    name: "agent-mac-runner",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "agent-vm-runner", path: "Sources"),
+        .executableTarget(name: "agent-mac-runner", path: "Sources"),
     ]
 )

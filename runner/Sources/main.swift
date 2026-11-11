@@ -1,13 +1,13 @@
-// agent-vm-runner: installs a macOS guest from an IPSW and runs it without a
+// agent-mac-runner: installs a macOS guest from an IPSW and runs it without a
 // window, on Apple's Virtualization.framework.
 //
-//   agent-vm-runner ipsw-url                    print the latest restore image URL for this host
-//   agent-vm-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
-//   agent-vm-runner run <bundle> [--recovery | --restore <state>]
+//   agent-mac-runner ipsw-url                    print the latest restore image URL for this host
+//   agent-mac-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
+//   agent-mac-runner run <bundle> [--recovery | --restore <state>]
 //                                               boot (or restore) headless; exits when the guest stops.
 //                                               SIGUSR1 saves state to <bundle>/state.vzvmsave and exits.
-//   agent-vm-runner can-save <bundle>           check the configuration supports save/restore
-//   agent-vm-runner mac <bundle>                print the guest's MAC address
+//   agent-mac-runner can-save <bundle>           check the configuration supports save/restore
+//   agent-mac-runner mac <bundle>                print the guest's MAC address
 //
 // A bundle is a directory holding config.json, disk.img, aux.img, and the
 // hardware model and machine identifier the guest was installed with.
@@ -24,12 +24,12 @@ struct Config: Codable {
 }
 
 func die(_ message: String) -> Never {
-    FileHandle.standardError.write("agent-vm-runner: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("agent-mac-runner: \(message)\n".data(using: .utf8)!)
     exit(1)
 }
 
 func log(_ message: String) {
-    FileHandle.standardError.write("agent-vm-runner: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("agent-mac-runner: \(message)\n".data(using: .utf8)!)
 }
 
 struct Bundle {
@@ -267,11 +267,11 @@ case "can-save":
 case "mac": print(Bundle(dir: URL(fileURLWithPath: args.count > 1 ? args[1] : ".")).loadConfig().mac)
 default:
     FileHandle.standardError.write("""
-    usage: agent-vm-runner ipsw-url
-           agent-vm-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
-           agent-vm-runner run <bundle> [--recovery | --restore <state>]
-           agent-vm-runner can-save <bundle>
-           agent-vm-runner mac <bundle>
+    usage: agent-mac-runner ipsw-url
+           agent-mac-runner create <bundle> <ipsw> [--disk-gb N] [--cpu N] [--memory-mb N]
+           agent-mac-runner run <bundle> [--recovery | --restore <state>]
+           agent-mac-runner can-save <bundle>
+           agent-mac-runner mac <bundle>
 
     """.data(using: .utf8)!)
     exit(2)
