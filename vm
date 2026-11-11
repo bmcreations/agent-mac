@@ -606,6 +606,8 @@ cmd_restore() {
   if [ "$ok" = 1 ]; then
     for f in disk.img aux.img config.json; do rm -f "$bundle/$f.pre-restore"; done
     for i in $(seq 60); do g true 2>/dev/null && break; sleep 1; done
+    # The guest wakes at save time; a snapshot restored days later would be days behind.
+    g "sudo -n date -u $(date -u +%m%d%H%M%Y.%S) >/dev/null" || true
     log "restored $name ($(tail -c +$((off + 1)) "$log" | sed -n 's/.*restored [^ ]* in \([0-9.]* s\).*/\1/p' | tail -1)), up at $(ip)"
     return
   fi
