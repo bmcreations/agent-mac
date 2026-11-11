@@ -59,10 +59,20 @@ and its `-V` limit counts media time, so on a still screen it never stops.
 
 Commands run over ssh have `/usr/libexec/sshd-keygen-wrapper` as their
 responsible process, so that is what needs Accessibility, Screen Recording
-and Post Event. macOS still raises a "bypass the private window picker" alert
-for capture from it; `vm setup` and `vm record start` press its Allow button
-through System Events. Writing `ScreenCaptureApprovals.plist` doesn't stop
-the alert, because replayd rewrites the file.
+and Post Event. `provision tcc` writes those rows into the guest's TCC.db
+from the host; macOS honors them with SIP on.
+
+replayd also raises a "bypass the private window picker" alert the first time
+a video capture runs, then again every 30 days. It records when it last showed
+the alert in `~/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist`,
+which the guest itself can't write. `provision tcc` writes that record from the
+host as already shown, with the next reminder ten years out, so recordings
+start without the alert. On a guest set up without `provision`, `vm setup` and
+`vm record start` press Allow through System Events instead.
+
+If you create `~/Library/Group Containers` yourself, it has to belong to the
+user: owned by root, macOS can't make the other apps' containers, and the menu
+bar and widgets don't draw.
 
 ## Reaching a host service
 

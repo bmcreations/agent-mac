@@ -4,9 +4,10 @@
 #
 #   provision base <bundle> <ssh-pubkey>   skip Setup Assistant; first boot creates
 #                                         the admin user, autologin, ssh, sudo
-#   provision tcc <bundle>                 grant Accessibility, Screen Recording,
-#                                         Post Event and Apple Events to commands
-#                                         run over ssh (after the first boot)
+#   provision tcc <bundle>                 grant Accessibility, Screen Recording and
+#                                         Post Event to commands run over ssh, and
+#                                         mark replayd's window-picker hint as
+#                                         shown (after the first boot)
 #   provision check <bundle>               print what is on the Data volume
 #
 # The guest must be stopped. GUEST_USER and GUEST_PASS default to admin/admin.
@@ -27,9 +28,10 @@ trap cleanup EXIT
 # Attach <bundle>/disk.img and mount its Data volume read-write with owners on.
 # Writing root-owned files (the first-boot LaunchDaemon) needs sudo on the host.
 mount_data() {
-  local img=$1/disk.img out vol
-  [ -f "$img" ] || die "no disk.img in $1"
-  pgrep -f "agent-vm-runner run $1" >/dev/null && die "the guest is running; stop it first"
+  local b; b=$(cd "$1" && pwd) || die "no bundle at $1"
+  local img=$b/disk.img out vol
+  [ -f "$img" ] || die "no disk.img in $b"
+  pgrep -f "agent-vm-runner run $b" >/dev/null && die "the guest is running; stop it first"
   out=$(diskutil image attach --noMount "$img")
   disks=($(echo "$out" | awk '$1 ~ /^\/dev\/disk[0-9]+$/ {print $1}' | sort -u))
   vol=$(diskutil apfs list -plist | python3 -c '
@@ -125,15 +127,32 @@ cmd_tcc() {
   db="$d/Library/Application Support/com.apple.TCC/TCC.db"
   sudo test -f "$db" || die "no system TCC.db yet; boot the guest once first"
   local now; now=$(date +%s)
-  local sql="" c s
-  for c in /usr/libexec/sshd-keygen-wrapper /usr/bin/osascript; do
-    for s in kTCCServiceAccessibility kTCCServiceScreenCapture kTCCServicePostEvent; do
-      sql+="insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('$s','$c',1,2,4,1,'UNUSED',0,$now);"
-    done
-    sql+="insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,indirect_object_identifier,flags,last_modified) values ('kTCCServiceAppleEvents','$c',1,2,4,1,0,'com.apple.systemevents',0,$now);"
+  local sql="" c=/usr/libexec/sshd-keygen-wrapper s
+  for s in kTCCServiceAccessibility kTCCServiceScreenCapture kTCCServicePostEvent; do
+    sql+="insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) values ('$s','$c',1,2,4,1,'UNUSED',0,$now);"
   done
   sudo sqlite3 "$db" "$sql"
-  sudo sqlite3 "$db" "select service, client, auth_value from access where client in ('/usr/libexec/sshd-keygen-wrapper','/usr/bin/osascript')"
+  # A video capture raises replayd's "bypass the private window picker" hint the
+  # first time and then every kScreenCapturePrivacyHintPolicy seconds (30 days).
+  # The record lives in a group container the guest itself cannot write, so
+  # write it from here as already shown, with the next hint years away.
+  local gc="$d/Users/$GUEST_USER/Library/Group Containers"
+  local g="$gc/group.com.apple.replayd"
+  sudo test -d "$gc" || { sudo mkdir "$gc"; sudo chown 501:20 "$gc"; sudo chmod 700 "$gc"; }
+  sudo mkdir -p "$g"
+  python3 -c '
+import plistlib, sys, datetime as dt
+now = dt.datetime.now(dt.timezone.utc)
+rec = {"kScreenCaptureAlertableUsageCount": 1,
+       "kScreenCaptureApprovalLastAlerted": now,
+       "kScreenCaptureApprovalLastUsed": now,
+       "kScreenCapturePrivacyHintDate": now + dt.timedelta(days=3650),
+       "kScreenCapturePrivacyHintPolicy": 315360000}
+sys.stdout.buffer.write(plistlib.dumps({sys.argv[1]: rec}))' "$c" \
+    | sudo tee "$g/ScreenCaptureApprovals.plist" >/dev/null
+  sudo chown -R 501:20 "$g"
+  sudo chmod 700 "$g"; sudo chmod 600 "$g/ScreenCaptureApprovals.plist"
+  sudo sqlite3 "$db" "select service, client, auth_value from access where client = '$c'"
 }
 
 cmd_check() {

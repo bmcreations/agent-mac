@@ -141,7 +141,7 @@ EOF
   # agent-desktop: the launcher and its macOS helper, both arm64.
   tar -C "$AD_DIR" -cf - agent-desktop agent-desktop-darwin-arm64 \
       agent-desktop-macos-helper agent-desktop-macos-helper-darwin-arm64 \
-    | g "sudo mkdir -p /usr/local/lib/agent-desktop && sudo tar -C /usr/local/lib/agent-desktop -xf - \
+    | g "sudo mkdir -p /usr/local/lib/agent-desktop /usr/local/bin && sudo tar -C /usr/local/lib/agent-desktop -xf - \
          && sudo ln -sf /usr/local/lib/agent-desktop/agent-desktop /usr/local/bin/agent-desktop"
 }
 
