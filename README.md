@@ -84,7 +84,7 @@ and logs live in `.vm/` (gitignored).
 ./vm view stop
 ```
 
-voxl comes with the prepared guest (below), so `vm view` doesn't build
+voxl comes with the prepared guest (above), so `vm view` doesn't build
 anything. A guest made with `VM_BREW=0` builds it on the first `vm view`. voxl's
 binary links x264, which is GPL, so agent-vm never ships one; each guest
 builds the pinned version from source.
